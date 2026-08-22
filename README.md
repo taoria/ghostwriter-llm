@@ -57,8 +57,6 @@ Summary generation is manual. Summary injection can be enabled or disabled globa
 
 ![Ghostwriter LLM demo](demo.gif)
 
-The original MP4 recording is included as `QQ20260822-165446.mp4`.
-
 ## Development
 
 ```bash
