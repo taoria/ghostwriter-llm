@@ -22,15 +22,15 @@ export class GhostPopup {
   private ensureEl(view: EditorView): HTMLElement {
     if (this.el && document.body.contains(this.el)) return this.el;
     const el = document.createElement("div");
-    el.className = "llm-ghost-popup";
+    el.className = "ghostwriter-popup";
     el.style.display = "none";
     el.setAttribute("data-ignore-external-click", "true");
 
     const thinkingWrap = document.createElement("div");
-    thinkingWrap.className = "llm-ghost-popup-thinking";
+    thinkingWrap.className = "ghostwriter-popup-thinking";
     thinkingWrap.style.display = "none";
     const toggle = document.createElement("div");
-    toggle.className = "llm-ghost-popup-thinking-toggle";
+    toggle.className = "ghostwriter-popup-thinking-toggle";
     toggle.setText("Thinking");
     toggle.addEventListener("click", (e) => {
       e.preventDefault();
@@ -40,22 +40,22 @@ export class GhostPopup {
       }
     });
     const thinkingBody = document.createElement("div");
-    thinkingBody.className = "llm-ghost-popup-thinking-body";
+    thinkingBody.className = "ghostwriter-popup-thinking-body";
     thinkingWrap.appendChild(toggle);
     thinkingWrap.appendChild(thinkingBody);
     el.appendChild(thinkingWrap);
 
     const spinner = document.createElement("div");
-    spinner.className = "llm-ghost-popup-spinner";
+    spinner.className = "ghostwriter-popup-spinner";
     spinner.setText("Generating…");
     el.appendChild(spinner);
 
     const actions = document.createElement("div");
-    actions.className = "llm-ghost-popup-actions";
+    actions.className = "ghostwriter-popup-actions";
     actions.style.display = "none";
 
     const regen = document.createElement("button");
-    regen.className = "llm-ghost-popup-btn llm-ghost-popup-regen";
+    regen.className = "ghostwriter-popup-btn ghostwriter-popup-regen";
     regen.setText("Regenerate");
     regen.addEventListener("click", (e) => {
       e.preventDefault();
@@ -63,7 +63,7 @@ export class GhostPopup {
     });
 
     const dismiss = document.createElement("button");
-    dismiss.className = "llm-ghost-popup-btn llm-ghost-popup-dismiss";
+    dismiss.className = "ghostwriter-popup-btn ghostwriter-popup-dismiss";
     dismiss.setText("Dismiss");
     dismiss.addEventListener("click", (e) => {
       e.preventDefault();

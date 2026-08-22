@@ -1,6 +1,6 @@
 export type MessageRole = "user" | "assistant" | "system";
 
-export interface LLMGhostSettings {
+export interface GhostwriterSettings {
   apiBaseUrl: string;
   apiKey: string;
   model: string;
@@ -154,9 +154,9 @@ export function defaultPromptsFor(lang: PromptLanguage): PromptBundle {
 }
 
 export const PROMPT_BUNDLE_VERSION = 1;
-export const PROMPT_BUNDLE_MAGIC = "llm-ghost-prompts";
+export const PROMPT_BUNDLE_MAGIC = "ghostwriter-llm-prompts";
 
-export const DEFAULT_SETTINGS: LLMGhostSettings = {
+export const DEFAULT_SETTINGS: GhostwriterSettings = {
   apiBaseUrl: "https://api.openai.com/v1",
   apiKey: "",
   model: "gpt-4o-mini",

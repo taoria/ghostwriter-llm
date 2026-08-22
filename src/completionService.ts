@@ -2,7 +2,7 @@ import { requestUrl } from "obsidian";
 import * as nodeHttps from "https";
 import * as nodeHttp from "http";
 import {
-  LLMGhostSettings,
+  GhostwriterSettings,
   MessageRole,
   DEFAULT_PROMPT_TEMPLATE,
   DEFAULT_COT_TEMPLATE,
@@ -42,7 +42,7 @@ export function fillTemplate(
     .replace(/\{title\}/g, safe(vars.title));
 }
 
-export function buildMessages(p: CompletionParams, settings: LLMGhostSettings): ChatMessage[] {
+export function buildMessages(p: CompletionParams, settings: GhostwriterSettings): ChatMessage[] {
   const summary = p.summary?.trim() ?? "";
   const extra = settings.extraPrompt?.trim() ?? "";
   const title = p.title?.trim() ?? "";
@@ -113,7 +113,7 @@ const COMPLETION_CLOSE = "</completion>";
 const THINKING_OPEN = "<thinking>";
 const THINKING_CLOSE = "</thinking>";
 
-function streamPrefillThinking(settings: LLMGhostSettings): string {
+function streamPrefillThinking(settings: GhostwriterSettings): string {
   if (!settings.cotEnabled) return "";
   if (settings.cotTriggerRole !== "assistant") return "";
   const t = (settings.cotTrigger ?? "").trim();
@@ -272,7 +272,7 @@ function flushTrailingSafe(
 }
 
 export class CompletionService {
-  constructor(private settings: () => LLMGhostSettings) {}
+  constructor(private settings: () => GhostwriterSettings) {}
 
   private headers(): Record<string, string> {
     const s = this.settings();

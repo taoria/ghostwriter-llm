@@ -1,5 +1,5 @@
 import { App, Notice, TFile, TFolder, Vault, requestUrl } from "obsidian";
-import { LLMGhostSettings, DEFAULT_SUMMARY_SYSTEM_PROMPT } from "./settings";
+import { GhostwriterSettings, DEFAULT_SUMMARY_SYSTEM_PROMPT } from "./settings";
 
 export interface SummaryEntry {
   path: string;
@@ -16,7 +16,7 @@ function joinUrl(base: string, path: string): string {
 }
 
 export class SummaryService {
-  constructor(private app: App, private settings: () => LLMGhostSettings) {}
+  constructor(private app: App, private settings: () => GhostwriterSettings) {}
 
   private folderPath(): string {
     const configured = (this.settings().summaryFolder ?? "").trim()

@@ -1,5 +1,5 @@
 import { App, Notice, PluginSettingTab, Setting } from "obsidian";
-import type LLMGhostPlugin from "./main";
+import type GhostwriterPlugin from "./main";
 import {
   DEFAULT_SYSTEM_PROMPT,
   DEFAULT_PROMPT_TEMPLATE,
@@ -23,10 +23,10 @@ const PROMPT_KEYS: (keyof PromptBundle)[] = [
   "extraPrompt",
 ];
 
-export class LLMGhostSettingTab extends PluginSettingTab {
-  plugin: LLMGhostPlugin;
+export class GhostwriterSettingTab extends PluginSettingTab {
+  plugin: GhostwriterPlugin;
 
-  constructor(app: App, plugin: LLMGhostPlugin) {
+  constructor(app: App, plugin: GhostwriterPlugin) {
     super(app, plugin);
     this.plugin = plugin;
   }
@@ -35,10 +35,10 @@ export class LLMGhostSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    containerEl.createEl("h2", { text: "LLM Ghost Completion" });
+    containerEl.createEl("h2", { text: "Ghostwriter LLM" });
 
     const section = (title: string, description: string) => {
-      const heading = containerEl.createDiv({ cls: "llm-ghost-settings-section" });
+      const heading = containerEl.createDiv({ cls: "ghostwriter-settings-section" });
       heading.createEl("h3", { text: title });
       heading.createEl("p", { text: description });
     };
@@ -522,7 +522,7 @@ export class LLMGhostSettingTab extends PluginSettingTab {
     const a = document.createElement("a");
     a.href = url;
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
-    a.download = `llm-ghost-prompts-${stamp}.json`;
+    a.download = `ghostwriter-llm-prompts-${stamp}.json`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);

@@ -1,7 +1,7 @@
 import { Plugin, Notice, Editor, TFile } from "obsidian";
 import { EditorView } from "@codemirror/view";
-import { DEFAULT_SETTINGS, LLMGhostSettings } from "./settings";
-import { LLMGhostSettingTab } from "./settingsTab";
+import { DEFAULT_SETTINGS, GhostwriterSettings } from "./settings";
+import { GhostwriterSettingTab } from "./settingsTab";
 import { CompletionService, CompletionParams } from "./completionService";
 import { clearGhostEffect, getGhost, ghostExtension, setGhostEffect, GhostState } from "./ghostText";
 import { ghostKeymap } from "./keymap";
@@ -10,8 +10,8 @@ import { GhostPopup } from "./popup";
 import { PreviewCard } from "./previewCard";
 import { SummaryService, SummaryEntry } from "./summaryService";
 
-export default class LLMGhostPlugin extends Plugin {
-  settings!: LLMGhostSettings;
+export default class GhostwriterPlugin extends Plugin {
+  settings!: GhostwriterSettings;
   private service!: CompletionService;
   private summaryService!: SummaryService;
   private popup!: GhostPopup;
@@ -105,7 +105,7 @@ export default class LLMGhostPlugin extends Plugin {
     );
 
     this.statusBarEl = this.addStatusBarItem();
-    this.statusBarEl.addClass("llm-ghost-status");
+    this.statusBarEl.addClass("ghostwriter-status");
     this.statusBarEl.setAttribute("aria-label", "Toggle LLM summary injection");
     this.statusBarEl.addEventListener("click", () => {
       this.sessionSummaryOn = !this.sessionSummaryOn;
@@ -114,7 +114,7 @@ export default class LLMGhostPlugin extends Plugin {
     });
     this.updateStatusBar();
 
-    this.addSettingTab(new LLMGhostSettingTab(this.app, this));
+    this.addSettingTab(new GhostwriterSettingTab(this.app, this));
   }
 
   onunload() {

@@ -1,6 +1,6 @@
 {
-  "id": "obsidian-llm-ghost-completion",
-  "name": "LLM Ghost Completion",
+  "id": "ghostwriter-llm",
+  "name": "Ghostwriter LLM",
   "version": "0.1.0",
   "minAppVersion": "1.4.0",
   "description": "GitHub-Copilot-style inline LLM completion for Obsidian. Trigger via hotkey, accept with Shift+Insert, regenerate or dismiss on demand. Configurable provider (OpenAI-compatible default).",

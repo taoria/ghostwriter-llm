@@ -1,4 +1,4 @@
-# LLM Ghost Completion for Obsidian
+# Ghostwriter LLM for Obsidian
 
 GitHub Copilot-style inline writing completion for Obsidian, powered by an OpenAI-compatible chat-completions API.
 
@@ -23,7 +23,7 @@ GitHub Copilot-style inline writing completion for Obsidian, powered by an OpenA
 The default publish directory is:
 
 ```text
-test/test/.obsidian/plugins/obsidian-llm-ghost-completion/
+test/test/.obsidian/plugins/ghostwriter-llm/
 ```
 
 To publish to another local directory, set `OBSIDIAN_PLUGIN_DEST` before running `npm run publish`.

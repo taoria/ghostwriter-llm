@@ -53,7 +53,7 @@ class GhostWidget extends WidgetType {
   }
   toDOM(view: EditorView): HTMLElement {
     const span = document.createElement("span");
-    span.className = "llm-ghost";
+    span.className = "ghostwriter-ghost";
     span.textContent = this.text;
     return span;
   }

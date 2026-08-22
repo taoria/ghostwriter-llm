@@ -1,5 +1,5 @@
 {
-  "name": "obsidian-llm-ghost-completion",
+  "name": "ghostwriter-llm",
   "version": "0.1.0",
   "description": "GitHub-Copilot-style inline LLM completion for Obsidian",
   "private": true,
