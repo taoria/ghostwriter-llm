@@ -55,7 +55,7 @@ Summary generation is manual. Summary injection can be enabled or disabled globa
 
 ## Demo
 
-[Watch the simple usage video](QQ20260822-165446.mp4)
+The repository includes the simple usage video as `QQ20260822-165446.mp4`.
 
 ## Development
 
