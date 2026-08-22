@@ -1,0 +1,18 @@
+node_modules/
+
+# The test vault is generated/used locally and may contain API keys and private notes.
+test/test/.obsidian/
+
+# Keep the complete local test vault out of the repository.
+test/test/
+
+# Local tooling files.
+.agents/
+skills-lock.json
+opencode-proxy.bat
+
+# Local configuration and editor files.
+.env
+.env.*
+.DS_Store
+*.log
