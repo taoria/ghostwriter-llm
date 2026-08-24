@@ -3,6 +3,7 @@ import { GhostwriterSettings, DEFAULT_SUMMARY_SYSTEM_PROMPT } from "./settings";
 
 export interface SummaryEntry {
   path: string;
+  summaryFilePath: string;
   title: string;
   summary: string;
 }
@@ -59,7 +60,9 @@ export class SummaryService {
   private async readEntry(file: TFile): Promise<SummaryEntry | null> {
     try {
       const parsed = this.parseSummaryFile(await this.app.vault.cachedRead(file), file.basename);
-      return parsed ? { path: parsed.source, title: parsed.title, summary: parsed.summary } : null;
+      return parsed
+        ? { path: parsed.source, summaryFilePath: file.path, title: parsed.title, summary: parsed.summary }
+        : null;
     } catch {
       return null;
     }

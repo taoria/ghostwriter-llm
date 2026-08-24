@@ -246,7 +246,7 @@ export default class GhostwriterPlugin extends Plugin {
       try {
         const activeSummary = await this.summaryService.findForFile(file);
         if (signal.aborted) return "";
-        if (activeSummary && this.isSummaryEnabled(activeSummary.path)) {
+        if (activeSummary && activeSummary.summaryFilePath !== file.path && this.isSummaryEnabled(activeSummary.path)) {
           parts.push(`[Summary: ${activeSummary.title}]\n${activeSummary.summary}`);
         }
       } catch (err) {
@@ -260,7 +260,9 @@ export default class GhostwriterPlugin extends Plugin {
     } catch (err) {
       console.warn("collectAll failed", err);
     }
-    others = others.filter((e) => !(file instanceof TFile) || e.path !== file.path);
+    others = others.filter(
+      (e) => !(file instanceof TFile) || (e.path !== file.path && e.summaryFilePath !== file.path)
+    );
     others.sort((a, b) => a.title.localeCompare(b.title));
     for (const e of others) {
       if (this.isSummaryEnabled(e.path)) {
