@@ -70,10 +70,6 @@ npm run dev
 
 `npm run build` runs the TypeScript check, creates a production bundle, and publishes the plugin files to the local test vault. `npm run dev` starts the esbuild watch process.
 
-## Security
-
-API keys are stored by Obsidian in the plugin's local `data.json`. The test vault and its `.obsidian` directory are ignored by Git. Never commit `data.json` or any API key.
-
 ## License
 
 MIT
