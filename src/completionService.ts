@@ -16,10 +16,16 @@ export interface CompletionParams {
   title: string;
 }
 
+export interface CacheUsage {
+  promptTokens: number;
+  hitTokens: number;
+  missTokens: number;
+}
+
 export interface CompletionCallbacks {
   onThinkingDelta?: (delta: string) => void;
   onCompletionDelta: (delta: string) => void;
-  onDone: (completion: string, thinking: string) => void;
+  onDone: (completion: string, thinking: string, cacheUsage?: CacheUsage) => void;
   onError: (err: Error) => void;
 }
 
@@ -160,35 +166,75 @@ function joinUrl(base: string, path: string): string {
   return `${base}/${path}`;
 }
 
-function parseSSELine(line: string): string | null {
+interface SSEEvent {
+  done: boolean;
+  delta?: string;
+  cacheUsage?: CacheUsage;
+}
+
+function asTokenCount(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return Math.max(0, Math.floor(value));
+}
+
+function parseCacheUsage(raw: unknown): CacheUsage | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const usage = raw as Record<string, unknown>;
+  const hit = asTokenCount(usage.prompt_cache_hit_tokens);
+  const miss = asTokenCount(usage.prompt_cache_miss_tokens);
+  const prompt = asTokenCount(usage.prompt_tokens);
+  if (hit === null && miss === null) return undefined;
+  const hitTokens = hit ?? 0;
+  const missTokens = miss ?? Math.max(0, (prompt ?? hitTokens) - hitTokens);
+  return {
+    promptTokens: prompt ?? hitTokens + missTokens,
+    hitTokens,
+    missTokens,
+  };
+}
+
+export function formatCacheUsage(usage: CacheUsage): string {
+  const accountedTokens = usage.hitTokens + usage.missTokens;
+  const promptTokens = usage.promptTokens > 0 ? usage.promptTokens : accountedTokens;
+  const rate = promptTokens > 0 ? usage.hitTokens / promptTokens : 0;
+  return `${(rate * 100).toFixed(1)}% hit (${usage.hitTokens.toLocaleString()}/${promptTokens.toLocaleString()} prompt tokens)`;
+}
+
+function parseSSELine(line: string): SSEEvent | null {
   if (!line.startsWith("data:")) return null;
   const data = line.slice(5).trim();
-  if (data === "[DONE]") return "__DONE__";
+  if (data === "[DONE]") return { done: true };
   try {
     const json = JSON.parse(data);
     const delta = json?.choices?.[0]?.delta?.content;
-    return typeof delta === "string" ? delta : null;
+    return {
+      done: false,
+      delta: typeof delta === "string" ? delta : undefined,
+      cacheUsage: parseCacheUsage(json?.usage),
+    };
   } catch {
     return null;
   }
 }
 
-function parseSSEBody(body: string): string[] {
-  const deltas: string[] = [];
+function parseSSEBody(body: string): SSEEvent[] {
+  const events: SSEEvent[] = [];
   for (const raw of body.split("\n")) {
     const line = raw.trim();
     if (!line) continue;
-    const d = parseSSELine(line);
-    if (d === "__DONE__") break;
-    if (d) deltas.push(d);
+    const event = parseSSELine(line);
+    if (event?.done) break;
+    if (event) events.push(event);
   }
-  return deltas;
+  return events;
 }
 
 function ingestSSELine(line: string, state: StreamState, cot: boolean, cb: CompletionCallbacks): boolean {
-  const delta = parseSSELine(line.trim());
-  if (delta === "__DONE__") return true;
-  if (delta) ingestDelta(state, delta, cot, cb);
+  const event = parseSSELine(line.trim());
+  if (!event) return false;
+  if (event.done) return true;
+  if (event.cacheUsage) state.cacheUsage = event.cacheUsage;
+  if (event.delta) ingestDelta(state, event.delta, cot, cb);
   return false;
 }
 
@@ -202,6 +248,7 @@ interface StreamState {
   prevCompletion: string;
   leadingStripped: boolean;
   tailBuffer: string;
+  cacheUsage?: CacheUsage;
 }
 
 const TRAILING_NL = /[\r\n]+$/;
@@ -284,18 +331,17 @@ export class CompletionService {
   }
 
   private body(params: CompletionParams, stream: boolean): string {
-    const s = this.settings();
-    const messages = buildMessages(params, s);
-    return JSON.stringify({
-      model: s.model,
-      messages,
-      max_tokens: s.maxTokens,
-      temperature: s.temperature,
-      stream,
-    });
+    return JSON.stringify(this.buildPayload(params, stream));
   }
 
-  buildPayload(params: CompletionParams, stream: boolean): { model: string; messages: ChatMessage[]; max_tokens: number; temperature: number; stream: boolean } {
+  buildPayload(params: CompletionParams, stream: boolean): {
+    model: string;
+    messages: ChatMessage[];
+    max_tokens: number;
+    temperature: number;
+    stream: boolean;
+    stream_options?: { include_usage: boolean };
+  } {
     const s = this.settings();
     return {
       model: s.model,
@@ -303,6 +349,7 @@ export class CompletionService {
       max_tokens: s.maxTokens,
       temperature: s.temperature,
       stream,
+      ...(stream ? { stream_options: { include_usage: true } } : {}),
     };
   }
 
@@ -345,9 +392,11 @@ export class CompletionService {
       throw new Error(`API ${resp.status}: ${resp.text || "request failed"}`);
     }
     let content = "";
+    let cacheUsage: CacheUsage | undefined;
     try {
       const json = JSON.parse(resp.text);
       content = json?.choices?.[0]?.message?.content ?? "";
+      cacheUsage = parseCacheUsage(json?.usage);
     } catch {
       content = "";
     }
@@ -358,7 +407,7 @@ export class CompletionService {
     completion = completion.replace(/^[\s\r\n]+/, "");
     if (thinking) cb.onThinkingDelta?.(thinking);
     if (completion) cb.onCompletionDelta?.(completion);
-    cb.onDone(completion, thinking);
+    cb.onDone(completion, thinking, cacheUsage);
   }
 
   private async completeStreamingNode(
@@ -403,6 +452,7 @@ export class CompletionService {
         prevCompletion: "",
         leadingStripped: false,
         tailBuffer: "",
+        cacheUsage: undefined,
       };
       let buffer = "";
       let errorBody = "";
@@ -457,7 +507,8 @@ export class CompletionService {
             if (buffer.trim()) ingestSSELine(buffer, state, cot, cb);
             cb.onDone(
               cot ? extractCompletion(state.full) : trimOuter(state.full),
-              cot ? extractThinking(state.full) : ""
+              cot ? extractThinking(state.full) : "",
+              state.cacheUsage
             );
             done(true);
           });
@@ -515,13 +566,14 @@ export class CompletionService {
       const decoder = new TextDecoder("utf-8");
       let buffer = "";
       const prefilledFetch = streamPrefillThinking(this.settings());
-      const state: StreamState = {
-        full: prefilledFetch,
-        prevThinking: "",
-        prevCompletion: "",
-        leadingStripped: false,
-        tailBuffer: "",
-      };
+       const state: StreamState = {
+         full: prefilledFetch,
+         prevThinking: "",
+         prevCompletion: "",
+         leadingStripped: false,
+         tailBuffer: "",
+         cacheUsage: undefined,
+       };
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -538,7 +590,7 @@ export class CompletionService {
          }
        }
        if (buffer.trim()) ingestSSELine(buffer, state, cot, cb);
-      cb.onDone(cot ? extractCompletion(state.full) : trimOuter(state.full), cot ? extractThinking(state.full) : "");
+       cb.onDone(cot ? extractCompletion(state.full) : trimOuter(state.full), cot ? extractThinking(state.full) : "", state.cacheUsage);
       return true;
     } catch (err) {
       if (signal.aborted) return false;
@@ -566,13 +618,15 @@ export class CompletionService {
       prevCompletion: "",
       leadingStripped: false,
       tailBuffer: "",
+      cacheUsage: undefined,
     };
-    for (const d of deltas) {
+    for (const event of deltas) {
       if (signal.aborted) return;
-      ingestDelta(state, d, cot, cb);
+      if (event.cacheUsage) state.cacheUsage = event.cacheUsage;
+      if (event.delta) ingestDelta(state, event.delta, cot, cb);
       await sleep(15);
     }
-    cb.onDone(cot ? extractCompletion(state.full) : trimOuter(state.full), cot ? extractThinking(state.full) : "");
+    cb.onDone(cot ? extractCompletion(state.full) : trimOuter(state.full), cot ? extractThinking(state.full) : "", state.cacheUsage);
   }
 
   private async request(

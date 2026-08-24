@@ -14,6 +14,7 @@ export interface GhostwriterSettings {
   suffixChars: number;
   summary: string;
   summaryEnabled: boolean;
+  summaryDisabledPaths: string[];
   summaryFolder: string;
   summaryModel: string;
   summaryMaxTokens: number;
@@ -170,6 +171,7 @@ export const DEFAULT_SETTINGS: GhostwriterSettings = {
   suffixChars: 1000,
   summary: "",
   summaryEnabled: true,
+  summaryDisabledPaths: [],
   summaryFolder: "summaries",
   summaryModel: "gpt-4o-mini",
   summaryMaxTokens: 200,

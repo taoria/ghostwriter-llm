@@ -151,6 +151,28 @@
 .status-bar-item.ghostwriter-status.is-off {
   color: var(--text-faint);
 }
+
+.status-bar-item.ghostwriter-current-summary-status.is-na {
+  color: var(--text-faint);
+  cursor: default;
+}
+
+.status-bar-item.ghostwriter-cache-status.is-na {
+  color: var(--text-faint);
+  cursor: default;
+}
+
+.llm-preview-cache-usage {
+  padding: 5px 8px;
+  border-left: 2px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-family: var(--font-monospace);
+}
+
+.llm-preview-cache-usage.is-available {
+  color: var(--color-green, var(--text-accent));
+}
 .llm-preview-prompt-wrap {
   border: 1px dashed var(--background-modifier-border);
   border-radius: 6px;

@@ -1,4 +1,5 @@
 import { App, Modal } from "obsidian";
+import { CacheUsage, formatCacheUsage } from "./completionService";
 
 export interface PromptMessage {
   role: string;
@@ -14,6 +15,7 @@ export class PreviewCard extends Modal {
   private thinkingEl: HTMLElement | null = null;
   private thinkingBody: HTMLElement | null = null;
   private completionEl: HTMLElement | null = null;
+  private cacheUsageEl: HTMLElement | null = null;
   private statusEl: HTMLElement | null = null;
   private actionsEl: HTMLElement | null = null;
   private acceptBtn: HTMLButtonElement | null = null;
@@ -51,6 +53,10 @@ export class PreviewCard extends Modal {
     status.setText("Generating…");
     status.createSpan({ cls: "llm-preview-spinner" });
     this.statusEl = status;
+
+    const cacheUsage = contentEl.createDiv({ cls: "llm-preview-cache-usage" });
+    cacheUsage.setText("Prompt cache: waiting for usage data");
+    this.cacheUsageEl = cacheUsage;
 
     const promptWrap = contentEl.createDiv({ cls: "llm-preview-prompt-wrap" });
     const promptToggle = promptWrap.createDiv({ cls: "llm-preview-prompt-toggle" });
@@ -150,6 +156,12 @@ export class PreviewCard extends Modal {
   setCompletion(text: string): void {
     this.completion = text;
     if (this.completionEl) this.renderText(this.completionEl, text);
+  }
+
+  setCacheUsage(usage?: CacheUsage): void {
+    if (!this.cacheUsageEl) return;
+    this.cacheUsageEl.setText(usage ? `Prompt cache: ${formatCacheUsage(usage)}` : "Prompt cache: not reported by provider");
+    this.cacheUsageEl.toggleClass("is-available", !!usage);
   }
 
   finish(): void {

@@ -10,6 +10,7 @@ GitHub Copilot-style inline writing completion for Obsidian, powered by an OpenA
 - Configurable prompt templates, message roles, and completion context.
 - OpenAI-compatible providers, including local servers such as llama.cpp.
 - Separate, manually generated note summaries stored as `summary-{number}.md` files.
+- Prompt cache hit-rate reporting for providers such as DeepSeek.
 - Configurable accept and dismiss shortcuts.
 
 ## Quick Start
@@ -42,7 +43,9 @@ source: "path/to/note.md"
 The manually generated summary text.
 ```
 
-Summary generation is manual. Summary injection can be enabled or disabled globally in settings, or temporarily with the `Summary: ON/OFF` status-bar item or the `Toggle summary injection (session)` command.
+Summary generation is manual. Summary injection can be enabled or disabled globally in settings, or temporarily with the `Summary: ON/OFF` status-bar item or the `Toggle summary injection (session)` command. The `Note summary: ON/OFF` status-bar item and `Toggle current note summary injection` command persistently exclude or include the active note's summary without affecting other summaries.
+
+The bottom status bar shows `Cache: ...` after each completion, and preview mode shows the full prompt-cache usage. DeepSeek automatically caches matching prompt prefixes server-side and reports `prompt_cache_hit_tokens` and `prompt_cache_miss_tokens`; the plugin calculates the hit rate from those response fields. Providers that do not report these fields show `N/A`.
 
 ## Settings Groups
 

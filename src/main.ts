@@ -2,7 +2,7 @@ import { Plugin, Notice, Editor, TFile } from "obsidian";
 import { EditorView } from "@codemirror/view";
 import { DEFAULT_SETTINGS, GhostwriterSettings } from "./settings";
 import { GhostwriterSettingTab } from "./settingsTab";
-import { CompletionService, CompletionParams } from "./completionService";
+import { CacheUsage, CompletionService, CompletionParams, formatCacheUsage } from "./completionService";
 import { clearGhostEffect, getGhost, ghostExtension, setGhostEffect, GhostState } from "./ghostText";
 import { ghostKeymap } from "./keymap";
 import { getPrefixSuffix } from "./util";
@@ -24,6 +24,10 @@ export default class GhostwriterPlugin extends Plugin {
   private generating: boolean = false;
   private sessionSummaryOn: boolean = true;
   private statusBarEl: HTMLElement | null = null;
+  private currentSummaryStatusBarEl: HTMLElement | null = null;
+  private cacheStatusBarEl: HTMLElement | null = null;
+  private lastCacheUsage: CacheUsage | undefined;
+  private cacheUsageKnown: boolean = false;
 
   async onload() {
     await this.loadSettings();
@@ -72,6 +76,14 @@ export default class GhostwriterPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "toggle-current-summary-injection",
+      name: "Toggle current note summary injection",
+      editorCallback: () => {
+        void this.toggleCurrentSummary();
+      },
+    });
+
+    this.addCommand({
       id: "regenerate-current-note-summary",
       name: "Generate summary for current note",
       editorCallback: async (editor: Editor) => {
@@ -101,6 +113,7 @@ export default class GhostwriterPlugin extends Plugin {
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
         this.dismiss();
+        this.updateStatusBar();
       })
     );
 
@@ -112,6 +125,17 @@ export default class GhostwriterPlugin extends Plugin {
       this.updateStatusBar();
       new Notice(`Summary injection ${this.sessionSummaryOn ? "ON" : "OFF"}`);
     });
+
+    this.currentSummaryStatusBarEl = this.addStatusBarItem();
+    this.currentSummaryStatusBarEl.addClass("ghostwriter-status", "ghostwriter-current-summary-status");
+    this.currentSummaryStatusBarEl.setAttribute("aria-label", "Toggle current note summary injection");
+    this.currentSummaryStatusBarEl.addEventListener("click", () => {
+      void this.toggleCurrentSummary();
+    });
+
+    this.cacheStatusBarEl = this.addStatusBarItem();
+    this.cacheStatusBarEl.addClass("ghostwriter-status", "ghostwriter-cache-status");
+    this.cacheStatusBarEl.setAttribute("aria-label", "Prompt cache hit rate from the last completion");
     this.updateStatusBar();
 
     this.addSettingTab(new GhostwriterSettingTab(this.app, this));
@@ -173,6 +197,7 @@ export default class GhostwriterPlugin extends Plugin {
     const ac = new AbortController();
     this.currentAbort = ac;
     this.generating = true;
+    this.resetCacheStatus();
 
     const summaryOn = this.sessionSummaryOn && this.settings.summaryEnabled;
     let summary = "";
@@ -221,7 +246,7 @@ export default class GhostwriterPlugin extends Plugin {
       try {
         const activeSummary = await this.summaryService.findForFile(file);
         if (signal.aborted) return "";
-        if (activeSummary) {
+        if (activeSummary && this.isSummaryEnabled(activeSummary.path)) {
           parts.push(`[Summary: ${activeSummary.title}]\n${activeSummary.summary}`);
         }
       } catch (err) {
@@ -238,7 +263,9 @@ export default class GhostwriterPlugin extends Plugin {
     others = others.filter((e) => !(file instanceof TFile) || e.path !== file.path);
     others.sort((a, b) => a.title.localeCompare(b.title));
     for (const e of others) {
-      parts.push(`[Summary: ${e.title}]\n${e.summary}`);
+      if (this.isSummaryEnabled(e.path)) {
+        parts.push(`[Summary: ${e.title}]\n${e.summary}`);
+      }
     }
 
     const manual = (s.summary ?? "").trim();
@@ -249,12 +276,80 @@ export default class GhostwriterPlugin extends Plugin {
     return parts.join("\n\n");
   }
 
+  private isSummaryEnabled(sourcePath: string): boolean {
+    return !(this.settings.summaryDisabledPaths ?? []).includes(sourcePath);
+  }
+
+  private async toggleCurrentSummary(): Promise<void> {
+    const file = this.app.workspace.getActiveFile();
+    if (!file || !file.path.toLowerCase().endsWith(".md")) {
+      new Notice("No active Markdown note");
+      return;
+    }
+
+    const disabledPaths = this.settings.summaryDisabledPaths ?? [];
+    const disabled = disabledPaths.includes(file.path);
+    this.settings.summaryDisabledPaths = disabled
+      ? disabledPaths.filter((path) => path !== file.path)
+      : [...disabledPaths, file.path];
+    await this.saveSettings();
+    this.updateStatusBar();
+    new Notice(`Current note summary ${disabled ? "ON" : "OFF"}`);
+  }
+
   updateStatusBar(): void {
-    if (!this.statusBarEl) return;
     const summaryActive = this.sessionSummaryOn && this.settings.summaryEnabled;
-    this.statusBarEl.setText(summaryActive ? "Summary: ON" : "Summary: OFF");
-    this.statusBarEl.toggleClass("is-on", summaryActive);
-    this.statusBarEl.toggleClass("is-off", !summaryActive);
+    if (this.statusBarEl) {
+      this.statusBarEl.setText(summaryActive ? "Summary: ON" : "Summary: OFF");
+      this.statusBarEl.toggleClass("is-on", summaryActive);
+      this.statusBarEl.toggleClass("is-off", !summaryActive);
+    }
+
+    if (this.currentSummaryStatusBarEl) {
+      const file = this.app.workspace.getActiveFile();
+      const noteActive = !!file && file.path.toLowerCase().endsWith(".md");
+      const currentSummaryOn = noteActive && this.isSummaryEnabled(file.path);
+      this.currentSummaryStatusBarEl.setText(noteActive ? `Note summary: ${currentSummaryOn ? "ON" : "OFF"}` : "Note summary: N/A");
+      this.currentSummaryStatusBarEl.toggleClass("is-on", currentSummaryOn);
+      this.currentSummaryStatusBarEl.toggleClass("is-off", noteActive && !currentSummaryOn);
+      this.currentSummaryStatusBarEl.toggleClass("is-na", !noteActive);
+    }
+
+    this.updateCacheStatus();
+  }
+
+  private resetCacheStatus(): void {
+    this.lastCacheUsage = undefined;
+    this.cacheUsageKnown = false;
+    this.updateCacheStatus();
+  }
+
+  private recordCacheUsage(usage?: CacheUsage): void {
+    this.lastCacheUsage = usage;
+    this.cacheUsageKnown = true;
+    this.updateCacheStatus();
+  }
+
+  private updateCacheStatus(): void {
+    if (!this.cacheStatusBarEl) return;
+    if (!this.cacheUsageKnown) {
+      this.cacheStatusBarEl.setText("Cache: --");
+      this.cacheStatusBarEl.setAttribute("title", "No completion has been completed yet");
+      this.cacheStatusBarEl.toggleClass("is-available", false);
+      this.cacheStatusBarEl.toggleClass("is-na", true);
+      return;
+    }
+    if (!this.lastCacheUsage) {
+      this.cacheStatusBarEl.setText("Cache: N/A");
+      this.cacheStatusBarEl.setAttribute("title", "The provider did not report prompt cache usage");
+      this.cacheStatusBarEl.toggleClass("is-available", false);
+      this.cacheStatusBarEl.toggleClass("is-na", true);
+      return;
+    }
+    this.cacheStatusBarEl.setText(`Cache: ${formatCacheUsage(this.lastCacheUsage).split(" (")[0]}`);
+    this.cacheStatusBarEl.setAttribute("title", `Prompt cache: ${formatCacheUsage(this.lastCacheUsage)}`);
+    this.cacheStatusBarEl.toggleClass("is-available", true);
+    this.cacheStatusBarEl.toggleClass("is-na", false);
   }
 
   private completionContextIsCurrent(view: EditorView, pos: number, ac: AbortController, doc: typeof view.state.doc): boolean {
@@ -286,8 +381,9 @@ export default class GhostwriterPlugin extends Plugin {
           accumulated += delta;
           this.setGhostInView(view, { text: accumulated, pos });
         },
-        onDone: (completion) => {
+        onDone: (completion, _thinking, cacheUsage) => {
           if (!this.completionContextIsCurrent(view, pos, ac, sourceDoc)) return;
+          this.recordCacheUsage(cacheUsage);
           this.generating = false;
           this.currentAbort = null;
           if (completion) {
@@ -333,6 +429,7 @@ export default class GhostwriterPlugin extends Plugin {
         max_tokens: payload.max_tokens,
         temperature: payload.temperature,
         stream: payload.stream,
+        stream_options: payload.stream_options,
       });
     } catch (err) {
       console.warn("buildPayload failed", err);
@@ -349,11 +446,13 @@ export default class GhostwriterPlugin extends Plugin {
           if (ac.signal.aborted) return;
           card.appendCompletion(delta);
         },
-        onDone: (completion, thinking) => {
+        onDone: (completion, thinking, cacheUsage) => {
           if (ac.signal.aborted) return;
+          this.recordCacheUsage(cacheUsage);
           this.generating = false;
           this.currentAbort = null;
           if (completion) card.setCompletion(completion);
+          card.setCacheUsage(cacheUsage);
           card.finish();
         },
         onError: (err) => {
@@ -413,6 +512,7 @@ export default class GhostwriterPlugin extends Plugin {
     const ac = new AbortController();
     this.currentAbort = ac;
     this.generating = true;
+    this.resetCacheStatus();
     let summary = params.summary;
     if (this.sessionSummaryOn && this.settings.summaryEnabled) {
       try {
