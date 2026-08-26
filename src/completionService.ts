@@ -14,6 +14,8 @@ export interface CompletionParams {
   suffix: string;
   summary: string;
   title: string;
+  /** Short user requirement for this continuation (from the instruction hotkey). Injected at {extra}. */
+  instruction?: string;
 }
 
 export interface CacheUsage {
@@ -50,7 +52,10 @@ export function fillTemplate(
 
 export function buildMessages(p: CompletionParams, settings: GhostwriterSettings): ChatMessage[] {
   const summary = p.summary?.trim() ?? "";
-  const extra = settings.extraPrompt?.trim() ?? "";
+  const extraParts = [settings.extraPrompt?.trim() ?? ""];
+  const instruction = p.instruction?.trim() ?? "";
+  if (instruction) extraParts.push(`[User instruction]\n${instruction}`);
+  const extra = extraParts.filter(Boolean).join("\n");
   const title = p.title?.trim() ?? "";
   const tpl = settings.promptTemplate && settings.promptTemplate.trim()
     ? settings.promptTemplate
@@ -164,6 +169,34 @@ function joinUrl(base: string, path: string): string {
   if (base.endsWith("/")) base = base.slice(0, -1);
   if (path.startsWith("/")) path = path.slice(1);
   return `${base}/${path}`;
+}
+
+export async function fetchModels(apiBaseUrl: string, apiKey: string): Promise<string[]> {
+  const url = joinUrl(apiBaseUrl.trim(), "models");
+  const headers: Record<string, string> = {};
+  if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+  const resp = await requestUrl({ url, method: "GET", headers, throw: false });
+  if (resp.status < 200 || resp.status >= 300) {
+    throw new Error(`API ${resp.status}: ${(resp.text || "failed to list models").slice(0, 300)}`);
+  }
+  let json: unknown;
+  try {
+    json = JSON.parse(resp.text);
+  } catch {
+    throw new Error("Models endpoint returned invalid JSON");
+  }
+  const container = json as { data?: unknown; models?: unknown };
+  const arr = Array.isArray(container?.data)
+    ? container.data
+    : Array.isArray(container?.models)
+      ? container.models
+      : Array.isArray(json)
+        ? json
+        : [];
+  const ids = arr
+    .map((m: unknown) => (typeof m === "string" ? m : (m as { id?: unknown } | null)?.id))
+    .filter((id): id is string => typeof id === "string" && id.length > 0);
+  return [...new Set(ids)].sort((a, b) => a.localeCompare(b));
 }
 
 interface SSEEvent {

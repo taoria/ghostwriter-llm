@@ -1,14 +1,66 @@
-import { Plugin, Notice, Editor, TFile } from "obsidian";
+import { Plugin, Notice, Editor, TFile, Modal, App } from "obsidian";
 import { EditorView } from "@codemirror/view";
-import { DEFAULT_SETTINGS, GhostwriterSettings } from "./settings";
+import { DEFAULT_SETTINGS, GhostwriterSettings, ProviderProfile } from "./settings";
 import { GhostwriterSettingTab } from "./settingsTab";
-import { CacheUsage, CompletionService, CompletionParams, formatCacheUsage } from "./completionService";
+import { CacheUsage, CompletionService, CompletionParams, formatCacheUsage, fetchModels } from "./completionService";
 import { clearGhostEffect, getGhost, ghostExtension, setGhostEffect, GhostState } from "./ghostText";
 import { ghostKeymap } from "./keymap";
 import { getPrefixSuffix } from "./util";
 import { GhostPopup } from "./popup";
 import { PreviewCard } from "./previewCard";
 import { SummaryService, SummaryEntry } from "./summaryService";
+
+class InstructionModal extends Modal {
+  private onSubmit: (instruction: string) => void;
+
+  constructor(app: App, onSubmit: (instruction: string) => void) {
+    super(app);
+    this.onSubmit = onSubmit;
+  }
+
+  onOpen(): void {
+    this.contentEl.empty();
+    this.contentEl.createEl("h3", { text: "Continue with an instruction" });
+    this.contentEl.createEl("p", {
+      text: "Write a short requirement for this continuation. It applies to this generation only.",
+      cls: "setting-item-description",
+    });
+
+    const input = this.contentEl.createEl("input", { type: "text" });
+    input.placeholder = "e.g. continue as a bullet list / keep a formal tone";
+    input.style.width = "100%";
+    setTimeout(() => input.focus(), 10);
+
+    const submit = () => {
+      const value = input.value.trim();
+      this.close();
+      if (value) this.onSubmit(value);
+    };
+    input.addEventListener("keydown", (e: KeyboardEvent) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submit();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        this.close();
+      }
+    });
+
+    const btns = this.contentEl.createDiv();
+    btns.style.display = "flex";
+    btns.style.justifyContent = "flex-end";
+    btns.style.gap = "8px";
+    btns.style.marginTop = "12px";
+    const cancel = btns.createEl("button", { text: "Cancel" });
+    cancel.addEventListener("click", () => this.close());
+    const ok = btns.createEl("button", { text: "Continue", cls: "mod-cta" });
+    ok.addEventListener("click", () => submit());
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+}
 
 export default class GhostwriterPlugin extends Plugin {
   settings!: GhostwriterSettings;
@@ -42,6 +94,7 @@ export default class GhostwriterPlugin extends Plugin {
     this.registerEditorExtension([ghostExtension, ghostKeymap({
       onAccept: () => this.accept(),
       onDismiss: () => this.dismiss(),
+      isBusy: () => this.generating,
     }, () => ({
       accept: this.settings.acceptKey,
       dismiss: this.settings.dismissKey,
@@ -54,6 +107,20 @@ export default class GhostwriterPlugin extends Plugin {
         const view = this.getViewFromEditor(editor);
         if (!view) return;
         this.triggerCompletion(editor, view);
+      },
+    });
+
+    this.addCommand({
+      id: "trigger-llm-completion-with-instruction",
+      name: "Trigger LLM completion with an instruction",
+      hotkeys: [{ modifiers: ["Mod", "Shift"], key: "Enter" }],
+      editorCallback: (editor: Editor) => {
+        const view = this.getViewFromEditor(editor);
+        if (!view) return;
+        new InstructionModal(this.app, (instruction) => {
+          if (!instruction) return;
+          void this.triggerCompletion(editor, view, instruction);
+        }).open();
       },
     });
 
@@ -149,6 +216,36 @@ export default class GhostwriterPlugin extends Plugin {
 
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    if (!Array.isArray(this.settings.providers)) this.settings.providers = [];
+    if (this.settings.providers.length === 0) {
+      this.settings.providers.push({
+        id: "default",
+        name: "Default",
+        apiBaseUrl: this.settings.apiBaseUrl,
+        apiKey: this.settings.apiKey,
+        model: this.settings.model,
+      });
+      this.settings.activeProviderId = "default";
+    }
+    const active =
+      this.settings.providers.find((p) => p.id === this.settings.activeProviderId) ??
+      this.settings.providers[0];
+    this.applyProviderFields(active);
+    await this.saveSettings();
+  }
+
+  private applyProviderFields(p: ProviderProfile) {
+    this.settings.activeProviderId = p.id;
+    this.settings.apiBaseUrl = p.apiBaseUrl;
+    this.settings.apiKey = p.apiKey;
+    this.settings.model = p.model;
+  }
+
+  async switchProvider(id: string): Promise<void> {
+    const p = this.settings.providers.find((x) => x.id === id);
+    if (!p) return;
+    this.applyProviderFields(p);
+    await this.saveSettings();
   }
 
   async saveSettings() {
@@ -183,7 +280,7 @@ export default class GhostwriterPlugin extends Plugin {
     return name.replace(/\.md$/i, "");
   }
 
-  private async triggerCompletion(editor: Editor, view: EditorView) {
+  private async triggerCompletion(editor: Editor, view: EditorView, instruction: string = "") {
     if (this.generating) {
       this.abortCurrent();
       this.clearGhostInView(view);
@@ -220,6 +317,7 @@ export default class GhostwriterPlugin extends Plugin {
       suffix,
       summary,
       title,
+      instruction,
     };
 
     this.currentParams = params;
@@ -354,9 +452,11 @@ export default class GhostwriterPlugin extends Plugin {
     this.cacheStatusBarEl.toggleClass("is-na", false);
   }
 
-  private completionContextIsCurrent(view: EditorView, pos: number, ac: AbortController, doc: typeof view.state.doc): boolean {
+  private completionContextIsCurrent(view: EditorView, _pos: number, ac: AbortController, doc: typeof view.state.doc): boolean {
     if (ac.signal.aborted || this.currentAbort !== ac || this.currentView !== view) return false;
-    if (view.state.selection.main.head === pos && view.state.doc === doc) return true;
+    // Moving the cursor / clicking elsewhere must NOT cancel generation.
+    // Only a document edit invalidates the request (the anchor position would shift).
+    if (view.state.doc === doc) return true;
     ac.abort();
     this.generating = false;
     if (this.currentAbort === ac) this.currentAbort = null;
@@ -468,10 +568,10 @@ export default class GhostwriterPlugin extends Plugin {
     );
   }
 
-  private insertAtCursor(text: string) {
+  private insertAtCursor(text: string, offset?: number) {
     const editor = this.currentEditor;
     if (!editor) return;
-    const pos = editor.posToOffset(editor.getCursor("head"));
+    const pos = offset ?? editor.posToOffset(editor.getCursor("head"));
     editor.replaceRange(text, editor.offsetToPos(pos), editor.offsetToPos(pos));
     const newPos = pos + text.length;
     editor.setCursor(editor.offsetToPos(newPos));
@@ -486,10 +586,13 @@ export default class GhostwriterPlugin extends Plugin {
 
     this.abortCurrent();
     const text = ghost.text;
+    const pos = ghost.pos;
     this.clearGhostInView(view);
     this.popup.hide();
 
-    this.insertAtCursor(text);
+    // Insert at the suggestion anchor, not wherever the cursor currently is
+    // (the user may have clicked elsewhere while generating without cancelling).
+    this.insertAtCursor(text, pos);
   }
 
   private dismiss() {

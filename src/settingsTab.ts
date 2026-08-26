@@ -1,5 +1,7 @@
-import { App, Notice, PluginSettingTab, Setting } from "obsidian";
+import { App, Notice, PluginSettingTab, Setting, TextComponent, DropdownComponent } from "obsidian";
 import type GhostwriterPlugin from "./main";
+import { ProviderProfile } from "./settings";
+import { fetchModels } from "./completionService";
 import {
   DEFAULT_SYSTEM_PROMPT,
   DEFAULT_PROMPT_TEMPLATE,
@@ -92,44 +94,190 @@ export class GhostwriterSettingTab extends PluginSettingTab {
 
     // --- end prompt management ---
 
-    section("Connection & model", "Configure the OpenAI-compatible endpoint and generation limits.");
-    new Setting(containerEl)
-      .setName("API Base URL")
-      .setDesc("OpenAI-compatible endpoint. Works with OpenAI, DeepSeek, Moonshot, Together, local llama.cpp server, etc.")
-      .addText((text) =>
-        text
-          .setPlaceholder("https://api.openai.com/v1")
-          .setValue(this.plugin.settings.apiBaseUrl)
-          .onChange(async (value) => {
-            this.plugin.settings.apiBaseUrl = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
+    const s = () => this.plugin.settings;
+    const activeProfile = (): ProviderProfile | undefined =>
+      s().providers.find((p) => p.id === s().activeProviderId);
 
-    new Setting(containerEl)
-      .setName("API Key")
-      .setDesc("Stored in plaintext in data.json (standard Obsidian behavior).")
-      .addText((text) => {
-        text.inputEl.type = "password";
-        text.setPlaceholder("sk-...")
-          .setValue(this.plugin.settings.apiKey)
-          .onChange(async (value) => {
-            this.plugin.settings.apiKey = value;
-            await this.plugin.saveSettings();
+    const syncActive = async (patch: Partial<ProviderProfile>): Promise<void> => {
+      const st = s();
+      Object.assign(st, patch);
+      const p = st.providers.find((x) => x.id === st.activeProviderId);
+      if (p) Object.assign(p, patch);
+      await this.plugin.saveSettings();
+    };
+
+    section("Providers", "Save multiple OpenAI-compatible providers, switch between them, and fetch their model list.");
+    if (s().providers.length > 0) {
+      new Setting(containerEl)
+        .setName("Active provider")
+        .setDesc("Switching loads the saved Base URL, API key and model of that profile.")
+        .addDropdown((dd) => {
+          const opts: Record<string, string> = {};
+          for (const p of s().providers) opts[p.id] = p.name || p.id;
+          dd.addOptions(opts);
+          dd.setValue(s().activeProviderId);
+          dd.onChange(async (id) => {
+            await this.plugin.switchProvider(id);
+            this.display();
           });
+        })
+        .addButton((btn) => {
+          btn.setButtonText("Delete")
+            .setIcon("trash")
+            .setClass("mod-warning")
+            .setTooltip("Delete the active provider profile")
+            .onClick(async () => {
+              const st = s();
+              const idx = st.providers.findIndex((p) => p.id === st.activeProviderId);
+              if (idx >= 0) st.providers.splice(idx, 1);
+              if (!st.providers.length) {
+                st.providers.push({
+                  id: "default",
+                  name: "Default",
+                  apiBaseUrl: st.apiBaseUrl,
+                  apiKey: st.apiKey,
+                  model: st.model,
+                });
+                new Notice("Last profile deleted; recreated a Default profile");
+              } else {
+                new Notice("Provider deleted");
+              }
+              await this.plugin.switchProvider(st.providers[0].id);
+              this.display();
+            });
+        });
+    }
+
+    const newName = { value: "" };
+    new Setting(containerEl)
+      .setName("Add provider")
+      .setDesc("Create a new profile pre-filled with the current connection values, then edit it below.")
+      .addText((text) => {
+        text.setPlaceholder("Profile name");
+        text.onChange((v) => {
+          newName.value = v;
+        });
+      })
+      .addButton((btn) => {
+        btn.setButtonText("Add").setCta().onClick(async () => {
+          const st = s();
+          const name = newName.value.trim() || `Provider ${st.providers.length + 1}`;
+          const id = `p-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+          st.providers.push({
+            id,
+            name,
+            apiBaseUrl: st.apiBaseUrl,
+            apiKey: st.apiKey,
+            model: st.model,
+          });
+          await this.plugin.switchProvider(id);
+          this.display();
+          new Notice(`Provider "${name}" added`);
+        });
       });
 
-    new Setting(containerEl)
-      .setName("Model")
-      .addText((text) =>
-        text
-          .setPlaceholder("gpt-4o-mini")
-          .setValue(this.plugin.settings.model)
-          .onChange(async (value) => {
-            this.plugin.settings.model = value.trim();
-            await this.plugin.saveSettings();
+    const active = activeProfile();
+    if (active) {
+      let fetchedModels: string[] = [];
+      let modelText: TextComponent | null = null;
+      let modelDropdown: DropdownComponent | null = null;
+
+      new Setting(containerEl)
+        .setName("Profile name")
+        .setDesc("Display name of the active provider.")
+        .addText((text) =>
+          text.setValue(active.name).onChange((value) => {
+            void syncActive({ name: value });
           })
-      );
+        );
+
+      new Setting(containerEl)
+        .setName("API Base URL")
+        .setDesc("OpenAI-compatible endpoint. Works with OpenAI, DeepSeek, Moonshot, Together, local llama.cpp server, etc.")
+        .addText((text) =>
+          text
+            .setPlaceholder("https://api.openai.com/v1")
+            .setValue(active.apiBaseUrl)
+            .onChange(async (value) => {
+              await syncActive({ apiBaseUrl: value.trim() });
+            })
+        );
+
+      new Setting(containerEl)
+        .setName("API Key")
+        .setDesc("Stored in plaintext in data.json (standard Obsidian behavior). Each profile keeps its own key.")
+        .addText((text) => {
+          text.inputEl.type = "password";
+          text.setPlaceholder("sk-...")
+            .setValue(active.apiKey)
+            .onChange(async (value) => {
+              await syncActive({ apiKey: value });
+            });
+        });
+
+      const renderModelPick = (): void => {
+        pickContainer.empty();
+        modelDropdown = null;
+        if (!fetchedModels.length) return;
+        new Setting(pickContainer)
+          .setName("Fetched models")
+          .setDesc(`${fetchedModels.length} models reported by ${active.apiBaseUrl || "the endpoint"}. Pick one to fill the Model field.`)
+          .addDropdown((dd) => {
+            modelDropdown = dd;
+            dd.addOption("", "-- select a model --");
+            for (const m of fetchedModels) dd.addOption(m, m);
+            dd.setValue(fetchedModels.includes(active.model) ? active.model : "");
+            dd.onChange(async (m) => {
+              if (!m) return;
+              await syncActive({ model: m });
+              modelText?.setValue(m);
+            });
+          });
+      };
+
+      const modelSetting = new Setting(containerEl)
+        .setName("Model")
+        .setDesc("Type a model id manually, or fetch the list from the provider and pick one.")
+        .addText((text) => {
+          modelText = text;
+          text
+            .setPlaceholder("gpt-4o-mini")
+            .setValue(active.model)
+            .onChange(async (value) => {
+              await syncActive({ model: value.trim() });
+              const v = value.trim();
+              modelDropdown?.setValue(fetchedModels.includes(v) ? v : "");
+            });
+        })
+        .addButton((btn) => {
+          btn.setButtonText("Fetch models").onClick(async () => {
+            if (!active.apiBaseUrl.trim()) {
+              new Notice("Set an API Base URL first");
+              return;
+            }
+            btn.setDisabled(true).setButtonText("Fetching…");
+            try {
+              fetchedModels = await fetchModels(active.apiBaseUrl, active.apiKey);
+              if (!fetchedModels.length) new Notice("The provider returned no models");
+              else new Notice(`Found ${fetchedModels.length} models`);
+            } catch (err) {
+              new Notice(`Fetch models failed: ${(err as Error).message}`);
+            } finally {
+              btn.setDisabled(false).setButtonText("Fetch models");
+              renderModelPick();
+            }
+          });
+        });
+
+      // Place the fetched-models dropdown right below the Model row,
+      // not at the end of the whole settings container.
+      const pickContainer = document.createElement("div");
+      pickContainer.className = "ghostwriter-model-pick";
+      modelSetting.settingEl.insertAdjacentElement("afterend", pickContainer);
+      renderModelPick();
+    }
+
+    section("Generation limits", "Request limits shared by every provider.");
 
     new Setting(containerEl)
       .setName("Max tokens")

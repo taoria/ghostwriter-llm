@@ -1,9 +1,19 @@
 export type MessageRole = "user" | "assistant" | "system";
 
+export interface ProviderProfile {
+  id: string;
+  name: string;
+  apiBaseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
 export interface GhostwriterSettings {
   apiBaseUrl: string;
   apiKey: string;
   model: string;
+  providers: ProviderProfile[];
+  activeProviderId: string;
   maxTokens: number;
   maxWords: number;
   temperature: number;
@@ -43,11 +53,11 @@ Rules:
 - Be concise and coherent. Stop at a natural boundary (end of sentence/paragraph) unless more is clearly needed.
 - Hard limit: the continuation MUST NOT exceed {max_words} words (CJK characters counted individually, Latin words counted as words). Stopping mid-sentence at the limit is acceptable.
 - If a "summary" is provided, treat it as high-level context; do not recite it.
-- First reason briefly inside <thinking>...</thinking>, then provide the final continuation inside <completion></completion>. Only the content inside <completion> will be used.`;
+- Wrap the final continuation in <completion></completion>. Only the content inside <completion> will be used. Do not output anything else.`;
 
 export const DEFAULT_COT_TEMPLATE = `First think briefly inside <thinking></thinking> about how to continue (tone, cohesion, key points), then provide the final continuation inside <completion></completion>.`;
 
-export const DEFAULT_COT_TRIGGER = `(Think first, then continue) <thinking>`;
+export const DEFAULT_COT_TRIGGER = `(Optional reasoning) You may briefly plan inside <thinking></thinking> before writing the final continuation inside <completion></completion>. Keep the thinking short. Only the content inside <completion> will be used.`;
 
 export const DEFAULT_PROMPT_TEMPLATE = `[Note title]
 {title}
@@ -64,13 +74,7 @@ export const DEFAULT_PROMPT_TEMPLATE = `[Note title]
 [Text AFTER cursor]
 {suffix}
 
-Continue the writing at <<<CURSOR>>> inside <completion>. At most {max_words} words. Output only the continuation.
-
-[Response format]
-<thinking>
-</thinking>
-<completion>
-</completion>`;
+Continue the writing at <<<CURSOR>>> inside <completion>. At most {max_words} words. Output only the continuation.`;
 
 export const DEFAULT_SYSTEM_PROMPT_ZH = `你是一个 Obsidian 笔记的内联写作补全引擎。
 从光标所在位置自然地续写用户的文字，保持原有的语气、语言和格式（Markdown）。
@@ -80,11 +84,11 @@ export const DEFAULT_SYSTEM_PROMPT_ZH = `你是一个 Obsidian 笔记的内联�
 - 简洁连贯。除非明显需要更多内容，否则在自然边界（句末/段末）停止。
 - 硬性限制：续写不得超过 {max_words} 个字（中文按字符计，英文按单词计）。达到上限时可在句中停止。
 - 如果提供了"摘要"，将其作为高层背景使用，但不要复述它。
-- 先在 <thinking>...</thinking> 中简要推理，再在 <completion></completion> 中给出最终续写。只有 <completion> 内的内容会被采纳。`;
+- 将最终续写内容放入 <completion></completion> 内。只有 <completion> 内的内容会被采纳，不要输出其他任何内容。`;
 
 export const DEFAULT_COT_TEMPLATE_ZH = `请先在 <thinking></thinking> 中简要思考应如何续写（语气、衔接、要点），然后在 <completion></completion> 中给出最终续写内容。`;
 
-export const DEFAULT_COT_TRIGGER_ZH = `（先思考再续写）<thinking>`;
+export const DEFAULT_COT_TRIGGER_ZH = `（可选推理）你可以先在 <thinking></thinking> 中简要规划，再在 <completion></completion> 中给出最终续写。思考保持简短。只有 <completion> 内的内容会被采纳。`;
 
 export const DEFAULT_PROMPT_TEMPLATE_ZH = `[笔记标题]
 {title}
@@ -101,13 +105,7 @@ export const DEFAULT_PROMPT_TEMPLATE_ZH = `[笔记标题]
 [光标之后的文本]
 {suffix}
 
-请在 <<<光标>>> 处续写，写入 <completion> 内。最多 {max_words} 字。只输出续写内容。
-
-[回复格式]
-<thinking>
-</thinking>
-<completion>
-</completion>`;
+请在 <<<光标>>> 处续写，写入 <completion> 内。最多 {max_words} 字。只输出续写内容。`;
 
 export const DEFAULT_SUMMARY_SYSTEM_PROMPT = `You are a note-summarization engine for Obsidian.
 Write a concise, faithful summary of the user's note. Rules:
@@ -137,7 +135,7 @@ export function defaultPromptsFor(lang: PromptLanguage): PromptBundle {
       cotTemplate: DEFAULT_COT_TEMPLATE_ZH,
       cotTrigger: DEFAULT_COT_TRIGGER_ZH,
       cotTemplateRole: "user",
-      cotTriggerRole: "assistant",
+      cotTriggerRole: "system",
       promptTemplateRole: "user",
       extraPrompt: "",
     };
@@ -148,7 +146,7 @@ export function defaultPromptsFor(lang: PromptLanguage): PromptBundle {
     cotTemplate: DEFAULT_COT_TEMPLATE,
     cotTrigger: DEFAULT_COT_TRIGGER,
     cotTemplateRole: "user",
-    cotTriggerRole: "assistant",
+    cotTriggerRole: "system",
     promptTemplateRole: "user",
     extraPrompt: "",
   };
@@ -161,6 +159,8 @@ export const DEFAULT_SETTINGS: GhostwriterSettings = {
   apiBaseUrl: "https://api.openai.com/v1",
   apiKey: "",
   model: "gpt-4o-mini",
+  providers: [],
+  activeProviderId: "",
   maxTokens: 8192,
   maxWords: 100,
   temperature: 0.7,
@@ -180,11 +180,11 @@ export const DEFAULT_SETTINGS: GhostwriterSettings = {
   summaryInputChars: 8000,
   summaryScanLimit: 500,
   stream: true,
-  cotEnabled: true,
+  cotEnabled: false,
   cotTemplate: DEFAULT_COT_TEMPLATE,
   cotTemplateRole: "user",
   cotTrigger: DEFAULT_COT_TRIGGER,
-  cotTriggerRole: "assistant",
+  cotTriggerRole: "system",
   promptTemplateRole: "user",
   previewMode: false,
   peekCoT: false,
