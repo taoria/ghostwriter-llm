@@ -32,6 +32,10 @@ export interface GhostwriterSettings {
   summaryTemperature: number;
   summaryInputChars: number;
   summaryScanLimit: number;
+  disabledSummaryFiles: string[];
+  recallLevel: number;
+  adjacentDepth: number;
+  adjacentMaxNotes: number;
   stream: boolean;
   cotEnabled: boolean;
   cotTemplate: string;
@@ -179,6 +183,10 @@ export const DEFAULT_SETTINGS: GhostwriterSettings = {
   summaryTemperature: 0.3,
   summaryInputChars: 8000,
   summaryScanLimit: 500,
+  disabledSummaryFiles: [],
+  recallLevel: 1,
+  adjacentDepth: 1,
+  adjacentMaxNotes: 20,
   stream: true,
   cotEnabled: false,
   cotTemplate: DEFAULT_COT_TEMPLATE,

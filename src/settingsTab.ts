@@ -2,6 +2,7 @@ import { App, Notice, PluginSettingTab, Setting, TextComponent, DropdownComponen
 import type GhostwriterPlugin from "./main";
 import { ProviderProfile } from "./settings";
 import { fetchModels } from "./completionService";
+import { SummaryEntry } from "./summaryService";
 import {
   DEFAULT_SYSTEM_PROMPT,
   DEFAULT_PROMPT_TEMPLATE,
@@ -404,6 +405,57 @@ export class GhostwriterSettingTab extends PluginSettingTab {
           })
       );
 
+    section("Recall level", "Control how much context is collected into the completion prompt.");
+    new Setting(containerEl)
+      .setName("Recall level")
+      .setDesc("0 = cursor context only (no recall blocks). 1 = context + summaries (default). 2 = also inject linked adjacent notes (see depth below). 3 = full current note + all linked notes, summaries excluded.")
+      .addDropdown((dd) => {
+        dd.addOptions({
+          "0": "0 · Only cursor context",
+          "1": "1 · Context + summaries (default)",
+          "2": "2 · + Adjacent linked notes",
+          "3": "3 · Full context, no summaries",
+        });
+        dd.setValue(String(this.plugin.settings.recallLevel ?? 1));
+        dd.onChange(async (value) => {
+          const n = Number(value);
+          if ([0, 1, 2, 3].includes(n)) {
+            this.plugin.settings.recallLevel = n;
+            await this.plugin.saveSettings();
+          }
+        });
+      });
+
+    new Setting(containerEl)
+      .setName("Adjacent depth")
+      .setDesc("Link-follow depth for recall level 2. 1 = only notes directly linked to/from the current note. Deeper hops follow outgoing links.")
+      .addText((text) =>
+        text
+          .setValue(String(this.plugin.settings.adjacentDepth))
+          .onChange(async (value) => {
+            const n = Number(value);
+            if (Number.isFinite(n) && n >= 1) {
+              this.plugin.settings.adjacentDepth = Math.floor(n);
+              await this.plugin.saveSettings();
+            }
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Adjacent max notes")
+      .setDesc("Cap on how many adjacent note blocks may be injected per completion.")
+      .addText((text) =>
+        text
+          .setValue(String(this.plugin.settings.adjacentMaxNotes))
+          .onChange(async (value) => {
+            const n = Number(value);
+            if (Number.isFinite(n) && n >= 1) {
+              this.plugin.settings.adjacentMaxNotes = Math.floor(n);
+              await this.plugin.saveSettings();
+            }
+          })
+      );
+
     section("Summary recall", "Inject manually generated summaries from the configured summary folder into completion context.");
     new Setting(containerEl)
       .setName("Manual fallback summary")
@@ -431,6 +483,44 @@ export class GhostwriterSettingTab extends PluginSettingTab {
             this.plugin.updateStatusBar?.();
           })
       );
+
+    // Per-file switches: disable individual summary-N.md files regardless of their source note.
+    const fileListContainer = containerEl.createDiv({ cls: "ghostwriter-summary-files" });
+    void (async () => {
+      let entries: SummaryEntry[] = [];
+      try {
+        entries = await this.plugin.summaryService.collectAll(this.plugin.settings.summaryScanLimit);
+      } catch (err) {
+        console.warn("list summary files failed", err);
+      }
+      entries.sort((a, b) => a.summaryFilePath.localeCompare(b.summaryFilePath, undefined, { numeric: true }));
+      if (!entries.length) {
+        fileListContainer.createEl("p", {
+          text: "No summary files found.",
+          cls: "setting-item-description",
+        });
+        return;
+      }
+      for (const e of entries) {
+        const fileName = e.summaryFilePath.split("/").pop() ?? e.summaryFilePath;
+        new Setting(fileListContainer)
+          .setName(`${fileName} → ${e.title}`)
+          .setDesc(`Source: ${e.path}`)
+          .addToggle((toggle) =>
+            toggle
+              .setTooltip("Inject this summary file during recall")
+              .setValue(!(this.plugin.settings.disabledSummaryFiles ?? []).includes(e.summaryFilePath))
+              .onChange(async (value) => {
+                const st = this.plugin.settings;
+                const list = new Set(st.disabledSummaryFiles ?? []);
+                if (value) list.delete(e.summaryFilePath);
+                else list.add(e.summaryFilePath);
+                st.disabledSummaryFiles = [...list];
+                await this.plugin.saveSettings();
+              })
+          );
+      }
+    })();
 
     new Setting(containerEl)
       .setName("Summary folder")

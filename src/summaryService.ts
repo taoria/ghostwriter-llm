@@ -88,6 +88,35 @@ export class SummaryService {
     return null;
   }
 
+  /**
+   * Rewrite the frontmatter `source:` of every managed summary for which the
+   * callback returns a new path (null/undefined = leave untouched).
+   * Used to keep summaries associated with notes across renames/moves.
+   * Returns how many files were updated.
+   */
+  async renameSources(map: (sourcePath: string) => string | null): Promise<number> {
+    let changed = 0;
+    for (const f of this.summaryFiles()) {
+      const entry = await this.readEntry(f);
+      if (!entry) continue;
+      const next = map(entry.path);
+      if (!next || next === entry.path) continue;
+      try {
+        await this.app.vault.process(f, (data) => {
+          const m = data.match(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/);
+          if (!m) return data;
+          const fm = m[0].replace(/^source:\s*.*$/m, `source: ${JSON.stringify(next)}`);
+          if (fm === m[0]) return data;
+          return fm + data.slice(m[0].length);
+        });
+        changed++;
+      } catch {
+        // Leave this file alone; it can be fixed by regenerating the summary.
+      }
+    }
+    return changed;
+  }
+
   /** Generate a summary only when explicitly requested, writing a separate summary-N file. */
   async regenerate(file: TFile, signal: AbortSignal): Promise<string | null> {
     const content = await this.app.vault.read(file);

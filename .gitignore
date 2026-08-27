@@ -10,7 +10,7 @@ test/test/
 .agents/
 skills-lock.json
 opencode-proxy.bat
-
+TODO.md
 # Local configuration and editor files.
 .env
 .env.*

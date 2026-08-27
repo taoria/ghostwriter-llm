@@ -153,6 +153,11 @@ export class PreviewCard extends Modal {
     this.scrollToBottom();
   }
 
+  restartCompletion(): void {
+    this.completion = "";
+    if (this.completionEl) this.renderText(this.completionEl, this.completion);
+  }
+
   setCompletion(text: string): void {
     this.completion = text;
     if (this.completionEl) this.renderText(this.completionEl, text);

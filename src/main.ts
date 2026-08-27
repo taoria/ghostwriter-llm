@@ -1,4 +1,4 @@
-import { Plugin, Notice, Editor, TFile, Modal, App } from "obsidian";
+import { Plugin, Notice, Editor, TFile, TFolder, TAbstractFile, Modal, App } from "obsidian";
 import { EditorView } from "@codemirror/view";
 import { DEFAULT_SETTINGS, GhostwriterSettings, ProviderProfile } from "./settings";
 import { GhostwriterSettingTab } from "./settingsTab";
@@ -65,7 +65,7 @@ class InstructionModal extends Modal {
 export default class GhostwriterPlugin extends Plugin {
   settings!: GhostwriterSettings;
   private service!: CompletionService;
-  private summaryService!: SummaryService;
+  summaryService!: SummaryService;
   private popup!: GhostPopup;
   private preview: PreviewCard | null = null;
   private currentAbort: AbortController | null = null;
@@ -184,6 +184,13 @@ export default class GhostwriterPlugin extends Plugin {
       })
     );
 
+    // Keep summaries and disable lists in sync when notes/folders are renamed or moved.
+    this.registerEvent(
+      this.app.vault.on("rename", (file, oldPath) => {
+        void this.handleVaultRename(file, oldPath);
+      })
+    );
+
     this.statusBarEl = this.addStatusBarItem();
     this.statusBarEl.addClass("ghostwriter-status");
     this.statusBarEl.setAttribute("aria-label", "Toggle LLM summary injection");
@@ -231,6 +238,11 @@ export default class GhostwriterPlugin extends Plugin {
       this.settings.providers.find((p) => p.id === this.settings.activeProviderId) ??
       this.settings.providers[0];
     this.applyProviderFields(active);
+    if (!Array.isArray(this.settings.disabledSummaryFiles)) this.settings.disabledSummaryFiles = [];
+    const lvl = Math.floor(Number(this.settings.recallLevel ?? 1));
+    this.settings.recallLevel = Math.min(3, Math.max(0, Number.isFinite(lvl) ? lvl : 1));
+    this.settings.adjacentDepth = Math.max(1, Math.floor(Number(this.settings.adjacentDepth ?? 1)) || 1);
+    this.settings.adjacentMaxNotes = Math.max(1, Math.floor(Number(this.settings.adjacentMaxNotes ?? 20)) || 20);
     await this.saveSettings();
   }
 
@@ -311,7 +323,8 @@ export default class GhostwriterPlugin extends Plugin {
     }
 
     const title = this.getActiveNoteTitle();
-    const { prefix, suffix } = getPrefixSuffix(editor, this.settings.prefixChars, this.settings.suffixChars);
+    const windowChars = this.contextWindowChars();
+    const { prefix, suffix } = getPrefixSuffix(editor, windowChars.prefix, windowChars.suffix);
     const params: CompletionParams = {
       prefix,
       suffix,
@@ -337,43 +350,190 @@ export default class GhostwriterPlugin extends Plugin {
 
   private async buildSummaryContext(signal: AbortSignal): Promise<string> {
     const s = this.settings;
+    const level = this.recallLevel();
+    if (level === 0) return "";
     const file = this.app.workspace.getActiveFile();
     const parts: string[] = [];
 
-    if (file instanceof TFile && file.path.toLowerCase().endsWith(".md")) {
-      try {
-        const activeSummary = await this.summaryService.findForFile(file);
-        if (signal.aborted) return "";
-        if (activeSummary && activeSummary.summaryFilePath !== file.path && this.isSummaryEnabled(activeSummary.path)) {
-          parts.push(`[Summary: ${activeSummary.title}]\n${activeSummary.summary}`);
+    if (level < 3) {
+      if (file instanceof TFile && file.path.toLowerCase().endsWith(".md")) {
+        try {
+          const activeSummary = await this.summaryService.findForFile(file);
+          if (signal.aborted) return "";
+          if (
+            activeSummary &&
+            activeSummary.summaryFilePath !== file.path &&
+            this.isSummaryEnabled(activeSummary.path) &&
+            !this.isFileDisabled(activeSummary.summaryFilePath)
+          ) {
+            parts.push(`[Summary: ${activeSummary.title}]\n${activeSummary.summary}`);
+          }
+        } catch (err) {
+          console.warn("findCurrentNoteSummary failed", err);
         }
+      }
+
+      let others: SummaryEntry[] = [];
+      try {
+        others = await this.summaryService.collectAll(s.summaryScanLimit);
       } catch (err) {
-        console.warn("findCurrentNoteSummary failed", err);
+        console.warn("collectAll failed", err);
+      }
+      others = others.filter(
+        (e) =>
+          !(file instanceof TFile) ||
+          (e.path !== file.path && e.summaryFilePath !== file.path)
+      );
+      others.sort((a, b) => a.title.localeCompare(b.title));
+      for (const e of others) {
+        if (signal.aborted) return "";
+        if (this.isSummaryEnabled(e.path) && !this.isFileDisabled(e.summaryFilePath)) {
+          parts.push(`[Summary: ${e.title}]\n${e.summary}`);
+        }
+      }
+
+      const manual = (s.summary ?? "").trim();
+      if (manual) {
+        parts.push(`[Manual summary]\n${manual}`);
       }
     }
 
-    let others: SummaryEntry[] = [];
-    try {
-      others = await this.summaryService.collectAll(s.summaryScanLimit);
-    } catch (err) {
-      console.warn("collectAll failed", err);
-    }
-    others = others.filter(
-      (e) => !(file instanceof TFile) || (e.path !== file.path && e.summaryFilePath !== file.path)
-    );
-    others.sort((a, b) => a.title.localeCompare(b.title));
-    for (const e of others) {
-      if (this.isSummaryEnabled(e.path)) {
-        parts.push(`[Summary: ${e.title}]\n${e.summary}`);
+    if (level >= 2 && file instanceof TFile) {
+      const depth = level >= 3 ? Number.MAX_SAFE_INTEGER : Math.max(1, Math.floor(s.adjacentDepth || 1));
+      const maxNotes = Math.max(1, Math.floor(s.adjacentMaxNotes || 20));
+      try {
+        const blocks = await this.adjacentNoteBlocks(file, depth, maxNotes, signal);
+        parts.push(...blocks);
+      } catch (err) {
+        console.warn("adjacent notes recall failed", err);
       }
     }
-
-    const manual = (s.summary ?? "").trim();
-    if (manual) {
-      parts.push(`[Manual summary]\n${manual}`);
-    }
+    if (signal.aborted) return "";
 
     return parts.join("\n\n");
+  }
+
+  private recallLevel(): number {
+    const lvl = Math.floor(Number(this.settings.recallLevel ?? 1));
+    return Math.min(3, Math.max(0, Number.isFinite(lvl) ? lvl : 1));
+  }
+
+  /** Cursor context window; level 3 recalls the full note instead of the truncated window. */
+  private contextWindowChars(): { prefix: number; suffix: number } {
+    if (this.recallLevel() >= 3) {
+      return { prefix: Number.MAX_SAFE_INTEGER, suffix: Number.MAX_SAFE_INTEGER };
+    }
+    return { prefix: this.settings.prefixChars, suffix: this.settings.suffixChars };
+  }
+
+  private isFileDisabled(summaryFilePath: string): boolean {
+    return (this.settings.disabledSummaryFiles ?? []).includes(summaryFilePath);
+  }
+
+  /**
+   * Collect content blocks of "adjacent" notes — notes linked to/from the current
+   * note (symmetric at depth 1; deeper hops follow outgoing links only).
+   * Summary files themselves are never injected as adjacent notes.
+   */
+  private async adjacentNoteBlocks(
+    current: TFile,
+    depth: number,
+    maxNotes: number,
+    signal: AbortSignal
+  ): Promise<string[]> {
+    const resolved = (this.app.metadataCache.resolvedLinks ?? {}) as Record<string, Record<string, number>>;
+    const outgoing = (p: string): string[] => Object.keys(resolved[p] ?? {});
+
+    const frontier = new Set<string>();
+    for (const t of outgoing(current.path)) {
+      if (t !== current.path) frontier.add(t);
+    }
+    for (const [src, row] of Object.entries(resolved)) {
+      if (row && row[current.path] !== undefined && src !== current.path) frontier.add(src);
+    }
+
+    const expanded = new Set<string>([current.path]);
+    for (let d = 1; d < depth; d++) {
+      const grow: string[] = [];
+      for (const p of frontier) {
+        if (expanded.has(p)) continue;
+        expanded.add(p);
+        for (const t of outgoing(p)) {
+          if (!frontier.has(t) && !expanded.has(t)) grow.push(t);
+        }
+      }
+      if (!grow.length) break;
+      for (const t of grow) frontier.add(t);
+    }
+
+    const folder = (this.settings.summaryFolder ?? "").trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+    const sorted = [...frontier].sort((a, b) => a.localeCompare(b));
+    const blocks: string[] = [];
+    for (const path of sorted) {
+      if (blocks.length >= maxNotes || signal.aborted) break;
+      if (path === current.path || !path.toLowerCase().endsWith(".md")) continue;
+      if (folder && path.startsWith(`${folder}/`)) continue;
+      const f = this.app.vault.getAbstractFileByPath(path);
+      if (!(f instanceof TFile)) continue;
+      try {
+        const content = await this.app.vault.cachedRead(f);
+        const clipped = content.slice(0, Math.max(this.settings.summaryInputChars, 100)).trim();
+        if (clipped) blocks.push(`[Note: ${f.basename}]\n${clipped}`);
+      } catch {
+        // Skip unreadable files.
+      }
+    }
+    return blocks;
+  }
+
+  private async handleVaultRename(file: TAbstractFile, oldPath: string): Promise<void> {
+    const s = this.settings;
+    let touched = false;
+
+    const remapLists = (exactOld: string, newP: string, prefixMode: boolean) => {
+      const remap = (p: string): string =>
+        prefixMode
+          ? p.startsWith(exactOld + "/")
+            ? newP + p.slice(exactOld.length)
+            : p
+          : p === exactOld
+            ? newP
+            : p;
+      const apply = (list: string[] | undefined): [string[], boolean] => {
+        const arr = list ?? [];
+        const next = arr.map(remap);
+        const changed = next.some((p, i) => p !== arr[i]);
+        return [next, changed] as [string[], boolean];
+      };
+      const [dp, dChanged] = apply(s.summaryDisabledPaths);
+      if (dChanged) {
+        s.summaryDisabledPaths = dp;
+        touched = true;
+      }
+      const [fp, fChanged] = apply(s.disabledSummaryFiles);
+      if (fChanged) {
+        s.disabledSummaryFiles = fp;
+        touched = true;
+      }
+    };
+
+    try {
+      if (file instanceof TFile && file.path.toLowerCase().endsWith(".md")) {
+        remapLists(oldPath, file.path, false);
+        await this.summaryService.renameSources((src) => (src === oldPath ? file.path : null));
+      } else if (file instanceof TFolder) {
+        remapLists(oldPath, file.path, true);
+        await this.summaryService.renameSources((src) =>
+          src.startsWith(oldPath + "/") ? file.path + src.slice(oldPath.length) : null
+        );
+      }
+    } catch (err) {
+      console.warn("rename sync failed", err);
+    }
+    if (touched) {
+      await this.saveSettings();
+      this.updateStatusBar();
+    }
   }
 
   private isSummaryEnabled(sourcePath: string): boolean {
@@ -483,6 +643,11 @@ export default class GhostwriterPlugin extends Plugin {
           accumulated += delta;
           this.setGhostInView(view, { text: accumulated, pos });
         },
+        onRestart: () => {
+          if (ac.signal.aborted) return;
+          accumulated = "";
+          this.clearGhostInView(view);
+        },
         onDone: (completion, _thinking, cacheUsage) => {
           if (!this.completionContextIsCurrent(view, pos, ac, sourceDoc)) return;
           this.recordCacheUsage(cacheUsage);
@@ -547,6 +712,10 @@ export default class GhostwriterPlugin extends Plugin {
         onCompletionDelta: (delta) => {
           if (ac.signal.aborted) return;
           card.appendCompletion(delta);
+        },
+        onRestart: () => {
+          if (ac.signal.aborted) return;
+          card.restartCompletion();
         },
         onDone: (completion, thinking, cacheUsage) => {
           if (ac.signal.aborted) return;
@@ -633,7 +802,8 @@ export default class GhostwriterPlugin extends Plugin {
     }
     const cursorPos = view.state.selection.main.head;
     this.currentPos = cursorPos;
-    const context = getPrefixSuffix(editor, this.settings.prefixChars, this.settings.suffixChars);
+    const windowChars = this.contextWindowChars();
+    const context = getPrefixSuffix(editor, windowChars.prefix, windowChars.suffix);
     params.prefix = context.prefix;
     params.suffix = context.suffix;
     params.title = this.getActiveNoteTitle();

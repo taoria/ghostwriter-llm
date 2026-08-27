@@ -27,6 +27,8 @@ export interface CacheUsage {
 export interface CompletionCallbacks {
   onThinkingDelta?: (delta: string) => void;
   onCompletionDelta: (delta: string) => void;
+  /** Wrapper tags appeared after plain text was already streamed; receivers must clear what they accumulated. */
+  onRestart?: () => void;
   onDone: (completion: string, thinking: string, cacheUsage?: CacheUsage) => void;
   onError: (err: Error) => void;
 }
@@ -150,7 +152,11 @@ function trimOuter(s: string): string {
 
 export function extractCompletion(full: string): string {
   const start = full.lastIndexOf(COMPLETION_OPEN);
-  if (start < 0) return trimOuter(full);
+  if (start < 0) {
+    // No opening tag: still drop a stray closing tag if the model emitted one.
+    const close = full.indexOf(COMPLETION_CLOSE);
+    return trimOuter(close >= 0 ? full.slice(0, close) : full);
+  }
   const afterOpen = full.slice(start + COMPLETION_OPEN.length);
   const end = afterOpen.lastIndexOf(COMPLETION_CLOSE);
   const raw = end >= 0 ? afterOpen.slice(0, end) : afterOpen;
@@ -262,12 +268,12 @@ function parseSSEBody(body: string): SSEEvent[] {
   return events;
 }
 
-function ingestSSELine(line: string, state: StreamState, cot: boolean, cb: CompletionCallbacks): boolean {
+function ingestSSELine(line: string, state: StreamState, cb: CompletionCallbacks): boolean {
   const event = parseSSELine(line.trim());
   if (!event) return false;
   if (event.done) return true;
   if (event.cacheUsage) state.cacheUsage = event.cacheUsage;
-  if (event.delta) ingestDelta(state, event.delta, cot, cb);
+  if (event.delta) ingestDelta(state, event.delta, cb);
   return false;
 }
 
@@ -275,8 +281,12 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+type StreamMode = "detect" | "raw" | "tag";
+
 interface StreamState {
   full: string;
+  mode: StreamMode;
+  rawEmitted: boolean;
   prevThinking: string;
   prevCompletion: string;
   leadingStripped: boolean;
@@ -284,32 +294,73 @@ interface StreamState {
   cacheUsage?: CacheUsage;
 }
 
+function newStreamState(prefill: string): StreamState {
+  return {
+    full: prefill,
+    mode: prefill ? "tag" : "detect",
+    rawEmitted: false,
+    prevThinking: "",
+    prevCompletion: "",
+    leadingStripped: false,
+    tailBuffer: "",
+    cacheUsage: undefined,
+  };
+}
+
 const TRAILING_NL = /[\r\n]+$/;
 
-function ingestDelta(state: StreamState, delta: string, cot: boolean, cb: CompletionCallbacks): void {
+function rawFeed(state: StreamState, delta: string, cb: CompletionCallbacks): void {
+  let d = delta;
+  if (!state.leadingStripped) {
+    d = d.replace(/^[\s\r\n]+/, "");
+    if (d) state.leadingStripped = true;
+  }
+  flushTrailingSafe(state, d, cb);
+}
+
+/** Switch to strict tag extraction; if plain text was already streamed, ask receivers to clear it. */
+function enterTagMode(state: StreamState, cb: CompletionCallbacks): void {
+  state.mode = "tag";
+  if (state.rawEmitted) cb.onRestart?.();
+  state.rawEmitted = false;
+  state.prevCompletion = "";
+  state.prevThinking = "";
+}
+
+function ingestDelta(state: StreamState, delta: string, cb: CompletionCallbacks): void {
   state.full += delta;
-  if (!cot) {
-    let d = delta;
-    if (!state.leadingStripped) {
-      d = d.replace(/^[\s\r\n]+/, "");
-      if (d) state.leadingStripped = true;
+
+  if (state.mode === "detect") {
+    const hasOpen =
+      state.full.includes(COMPLETION_OPEN) || state.full.includes(THINKING_OPEN);
+    if (hasOpen) {
+      enterTagMode(state, cb);
+    } else {
+      const probe = state.full.replace(/^[\s\r\n]+/, "");
+      if (!probe) return;
+      if (probe.startsWith("<")) {
+        const lt = probe.lastIndexOf("<");
+        const cand = probe.slice(lt);
+        if (cand.length <= KNOWN_TAG_TAILS[1].length + 1 && possibleTagPrefix(cand)) return;
+      }
+      // Commit to plain-text mode; nothing was emitted while detecting,
+      // so replaying the whole buffer through the raw path is safe.
+      state.mode = "raw";
+      const buffered = state.full;
+      state.full = "";
+      ingestDelta(state, buffered, cb);
+      return;
     }
-    flushTrailingSafe(state, d, cb);
-    state.prevCompletion += delta;
-    return;
   }
 
   const hasCompletion = state.full.includes(COMPLETION_OPEN);
   const hasThinking = state.full.includes(THINKING_OPEN);
 
-  if (!hasCompletion && !hasThinking) {
-    let d = delta;
-    if (!state.leadingStripped) {
-      d = d.replace(/^[\s\r\n]+/, "");
-      if (d) state.leadingStripped = true;
-    }
-    flushTrailingSafe(state, d, cb);
-    state.prevCompletion += delta;
+  if (state.mode === "raw") {
+    // Locked raw: a late wrapper tag from a misbehaving model is streamed as-is;
+    // the final onDone text still strips it.
+    rawFeed(state, delta, cb);
+    if (delta) state.rawEmitted = true;
     return;
   }
 
@@ -335,6 +386,15 @@ function ingestDelta(state: StreamState, delta: string, cot: boolean, cb: Comple
   }
 }
 
+const KNOWN_TAG_TAILS = ["completion>", "/completion>", "thinking>", "/thinking>"];
+
+/** True if "<..." fragment could still grow into one of our wrapper tags. */
+function possibleTagPrefix(fragment: string): boolean {
+  if (!fragment.startsWith("<")) return false;
+  const rest = fragment.slice(1);
+  return KNOWN_TAG_TAILS.some((t) => t.startsWith(rest));
+}
+
 function flushTrailingSafe(
   state: StreamState,
   chunk: string,
@@ -345,10 +405,31 @@ function flushTrailingSafe(
   state.tailBuffer = "";
   let lastNon = combined.length;
   while (lastNon > 0 && /[\r\n]/.test(combined[lastNon - 1])) lastNon--;
-  const safe = combined.slice(0, lastNon);
-  const tail = combined.slice(lastNon);
+  // Hold back a trailing "<..." fragment that may be the start of a wrapper tag,
+  // so tag characters never leak into the visible completion.
+  const lt = combined.lastIndexOf("<", Math.max(0, lastNon - 1));
+  let safeEnd = lastNon;
+  if (lt >= 0 && lastNon - lt <= KNOWN_TAG_TAILS[1].length + 1) {
+    if (possibleTagPrefix(combined.slice(lt, lastNon))) safeEnd = lt;
+  }
+  const safe = combined.slice(0, safeEnd);
+  const tail = combined.slice(safeEnd);
   if (safe) cb.onCompletionDelta?.(safe);
   if (tail) state.tailBuffer = tail;
+}
+
+/** Commit any undecided buffer and emit whatever was held back (e.g. a trailing "<" that was plain text). */
+function finalizeStream(state: StreamState, cb: CompletionCallbacks): void {
+  if (state.mode === "detect") {
+    state.mode = "raw";
+    const buffered = state.full;
+    state.full = "";
+    ingestDelta(state, buffered, cb);
+  }
+  if (state.tailBuffer) {
+    cb.onCompletionDelta?.(state.tailBuffer);
+    state.tailBuffer = "";
+  }
 }
 
 export class CompletionService {
@@ -418,7 +499,6 @@ export class CompletionService {
     cb: CompletionCallbacks,
     signal: AbortSignal
   ): Promise<void> {
-    const cot = this.settings().cotEnabled;
     const resp = await this.request(url, this.body(params, false), signal);
     if (signal.aborted) return;
     if (resp.status < 200 || resp.status >= 300) {
@@ -433,11 +513,11 @@ export class CompletionService {
     } catch {
       content = "";
     }
-    const prefilled = cot ? streamPrefillThinking(this.settings()) : "";
+    const prefilled = streamPrefillThinking(this.settings());
     const fullContent = prefilled + content;
-    const thinking = cot ? extractThinking(fullContent) : "";
-    let completion = cot ? extractCompletion(fullContent) : content.replace(/^[\s\r\n]+/, "");
-    completion = completion.replace(/^[\s\r\n]+/, "");
+    const thinking = extractThinking(fullContent);
+    // Always strip <thinking>/<completion> wrappers, whether or not CoT is enabled.
+    const completion = extractCompletion(fullContent);
     if (thinking) cb.onThinkingDelta?.(thinking);
     if (completion) cb.onCompletionDelta?.(completion);
     cb.onDone(completion, thinking, cacheUsage);
@@ -449,7 +529,6 @@ export class CompletionService {
     cb: CompletionCallbacks,
     signal: AbortSignal
   ): Promise<boolean> {
-    const cot = this.settings().cotEnabled;
     let parsed: URL;
     try {
       parsed = new URL(url);
@@ -478,15 +557,7 @@ export class CompletionService {
         resolve(r);
       };
 
-      const prefilled = streamPrefillThinking(this.settings());
-      const state: StreamState = {
-        full: prefilled,
-        prevThinking: "",
-        prevCompletion: "",
-        leadingStripped: false,
-        tailBuffer: "",
-        cacheUsage: undefined,
-      };
+      const state = newStreamState(streamPrefillThinking(this.settings()));
       let buffer = "";
       let errorBody = "";
 
@@ -520,7 +591,7 @@ export class CompletionService {
               const line = buffer.slice(0, idx).trim();
               buffer = buffer.slice(idx + 1);
               if (!line) continue;
-              if (ingestSSELine(line, state, cot, cb)) {
+              if (ingestSSELine(line, state, cb)) {
                 buffer = "";
                 break;
               }
@@ -537,10 +608,11 @@ export class CompletionService {
               done(true);
               return;
             }
-            if (buffer.trim()) ingestSSELine(buffer, state, cot, cb);
+            if (buffer.trim()) ingestSSELine(buffer, state, cb);
+            finalizeStream(state, cb);
             cb.onDone(
-              cot ? extractCompletion(state.full) : trimOuter(state.full),
-              cot ? extractThinking(state.full) : "",
+              extractCompletion(state.full),
+              extractThinking(state.full),
               state.cacheUsage
             );
             done(true);
@@ -584,7 +656,6 @@ export class CompletionService {
     cb: CompletionCallbacks,
     signal: AbortSignal
   ): Promise<boolean> {
-    const cot = this.settings().cotEnabled;
     try {
       const resp = await fetch(url, {
         method: "POST",
@@ -598,15 +669,7 @@ export class CompletionService {
       const reader = resp.body.getReader();
       const decoder = new TextDecoder("utf-8");
       let buffer = "";
-      const prefilledFetch = streamPrefillThinking(this.settings());
-       const state: StreamState = {
-         full: prefilledFetch,
-         prevThinking: "",
-         prevCompletion: "",
-         leadingStripped: false,
-         tailBuffer: "",
-         cacheUsage: undefined,
-       };
+      const state = newStreamState(streamPrefillThinking(this.settings()));
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -616,14 +679,15 @@ export class CompletionService {
            const line = buffer.slice(0, idx).trim();
            buffer = buffer.slice(idx + 1);
            if (!line) continue;
-           if (ingestSSELine(line, state, cot, cb)) {
+           if (ingestSSELine(line, state, cb)) {
              buffer = "";
              break;
            }
          }
        }
-       if (buffer.trim()) ingestSSELine(buffer, state, cot, cb);
-       cb.onDone(cot ? extractCompletion(state.full) : trimOuter(state.full), cot ? extractThinking(state.full) : "", state.cacheUsage);
+       if (buffer.trim()) ingestSSELine(buffer, state, cb);
+       finalizeStream(state, cb);
+       cb.onDone(extractCompletion(state.full), extractThinking(state.full), state.cacheUsage);
       return true;
     } catch (err) {
       if (signal.aborted) return false;
@@ -637,29 +701,21 @@ export class CompletionService {
     cb: CompletionCallbacks,
     signal: AbortSignal
   ): Promise<void> {
-    const cot = this.settings().cotEnabled;
     const resp = await this.request(url, this.body(params, true), signal);
     if (signal.aborted) return;
     if (resp.status < 200 || resp.status >= 300) {
       throw new Error(`API ${resp.status}: ${resp.text || "request failed"}`);
     }
     const deltas = parseSSEBody(resp.text);
-    const prefilledRu = streamPrefillThinking(this.settings());
-    const state: StreamState = {
-      full: prefilledRu,
-      prevThinking: "",
-      prevCompletion: "",
-      leadingStripped: false,
-      tailBuffer: "",
-      cacheUsage: undefined,
-    };
+    const state = newStreamState(streamPrefillThinking(this.settings()));
     for (const event of deltas) {
       if (signal.aborted) return;
       if (event.cacheUsage) state.cacheUsage = event.cacheUsage;
-      if (event.delta) ingestDelta(state, event.delta, cot, cb);
+      if (event.delta) ingestDelta(state, event.delta, cb);
       await sleep(15);
     }
-    cb.onDone(cot ? extractCompletion(state.full) : trimOuter(state.full), cot ? extractThinking(state.full) : "", state.cacheUsage);
+    finalizeStream(state, cb);
+    cb.onDone(extractCompletion(state.full), extractThinking(state.full), state.cacheUsage);
   }
 
   private async request(
