@@ -311,6 +311,27 @@
   color: var(--text-error);
 }
 
+.llm-preview-error .llm-preview-section-header {
+  color: var(--text-error);
+}
+
+.llm-preview-error-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow-y: auto;
+  color: var(--text-error);
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+}
+
+.llm-preview-error-hint {
+  padding: 6px 10px;
+  border-top: 1px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
 .llm-preview-spinner {
   display: inline-block;
   width: 12px;

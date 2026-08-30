@@ -16,6 +16,8 @@ export interface CompletionParams {
   title: string;
   /** Short user requirement for this continuation (from the instruction hotkey). Injected at {extra}. */
   instruction?: string;
+  /** Novel mode: in-note plot summaries; appended at the very end of the prompt regardless of template/cursor position. */
+  novelContext?: string;
 }
 
 export interface CacheUsage {
@@ -105,7 +107,25 @@ export function buildMessages(p: CompletionParams, settings: GhostwriterSettings
     }
   }
 
-  return mergeAdjacent(messages);
+  const merged = mergeAdjacent(messages);
+
+  // Novel mode (feature 5): the in-note summary block is always appended at the very
+  // end of the prompt, no matter where the cursor is or how the template is arranged.
+  const novel = p.novelContext?.trim();
+  if (novel) {
+    const block = `[Novel context · 前文情节摘要（按正文顺序，位于光标之前）]\n${novel}`;
+    const last = merged[merged.length - 1];
+    if (last && last.role === "assistant") {
+      // Do not corrupt an assistant prefill; insert before it instead.
+      merged.splice(merged.length - 1, 0, { role: "user", content: block });
+    } else if (last) {
+      last.content += `\n\n${block}`;
+    } else {
+      merged.push({ role: "user", content: block });
+    }
+  }
+
+  return merged;
 }
 
 function mergeAdjacent(messages: ChatMessage[]): ChatMessage[] {
@@ -209,6 +229,7 @@ interface SSEEvent {
   done: boolean;
   delta?: string;
   cacheUsage?: CacheUsage;
+  finishReason?: string;
 }
 
 function asTokenCount(value: unknown): number | null {
@@ -250,13 +271,14 @@ function parseSSELine(line: string): SSEEvent | null {
       done: false,
       delta: typeof delta === "string" ? delta : undefined,
       cacheUsage: parseCacheUsage(json?.usage),
+      finishReason: typeof json?.choices?.[0]?.finish_reason === "string" ? json.choices[0].finish_reason : undefined,
     };
   } catch {
     return null;
   }
 }
 
-function parseSSEBody(body: string): SSEEvent[] {
+export function parseSSEBody(body: string): SSEEvent[] {
   const events: SSEEvent[] = [];
   for (const raw of body.split("\n")) {
     const line = raw.trim();
@@ -432,6 +454,12 @@ function finalizeStream(state: StreamState, cb: CompletionCallbacks): void {
   }
 }
 
+export function apiError(status: number, body: string): Error {
+  const text = (body || "request failed").trim();
+  const snippet = text.length > 600 ? `${text.slice(0, 600)}… (${text.length} chars total)` : text;
+  return new Error(`API ${status}: ${snippet}`);
+}
+
 export class CompletionService {
   constructor(private settings: () => GhostwriterSettings) {}
 
@@ -474,23 +502,63 @@ export class CompletionService {
   ): Promise<void> {
     const s = this.settings();
     const url = joinUrl(s.apiBaseUrl, "chat/completions");
+    const payload = this.body(params, s.stream);
+    const timeoutSec = Math.max(5, Math.floor(Number(s.requestTimeoutSec ?? 120) || 120));
+
+    // A hung provider must produce an error instead of an endless "Generating…" state.
+    const ctrl = new AbortController();
+    let timedOut = false;
+    const onOuterAbort = () => ctrl.abort();
+    if (signal.aborted) ctrl.abort();
+    signal.addEventListener("abort", onOuterAbort, { once: true });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      ctrl.abort();
+    }, timeoutSec * 1000);
+    const wire = ctrl.signal;
+
     try {
       if (s.stream) {
-        const nodeOk = await this.completeStreamingNode(url, params, cb, signal);
+        const nodeOk = await this.completeStreamingNode(url, params, cb, wire);
         if (nodeOk) return;
-        if (signal.aborted) return;
-        const fetchOk = await this.completeStreamingFetch(url, params, cb, signal);
+        if (wire.aborted) return;
+        const fetchOk = await this.completeStreamingFetch(url, params, cb, wire);
         if (fetchOk) return;
-        if (signal.aborted) return;
-        await this.completeStreamingRequestUrl(url, params, cb, signal);
+        if (wire.aborted) return;
+        await this.completeStreamingRequestUrl(url, params, cb, wire);
       } else {
-        await this.completeOneShot(url, params, cb, signal);
+        await this.completeOneShot(url, params, cb, wire);
+      }
+      if (timedOut) {
+        cb.onError(new Error(`Request timed out after ${timeoutSec}s (provider did not respond)`));
       }
     } catch (err) {
       if (signal.aborted) return;
+      if (timedOut) {
+        cb.onError(new Error(`Request timed out after ${timeoutSec}s (provider did not respond)`));
+        return;
+      }
       if ((err as Error).name === "AbortError") return;
+      this.logFailure(url, s, payload, err as Error);
       cb.onError(err as Error);
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onOuterAbort);
     }
+  }
+
+  private logFailure(url: string, s: GhostwriterSettings, payload: string, err: Error): void {
+    let messagesChars = 0;
+    try {
+      const parsed = JSON.parse(payload) as { messages?: { content?: string }[] };
+      messagesChars = (parsed.messages ?? []).reduce((a, m) => a + (m.content?.length ?? 0), 0);
+    } catch {
+      // ignore
+    }
+    console.error(
+      "[ghostwriter] completion failed",
+      { url, model: s.model, stream: s.stream, messagesChars, error: err }
+    );
   }
 
   private async completeOneShot(
@@ -502,7 +570,7 @@ export class CompletionService {
     const resp = await this.request(url, this.body(params, false), signal);
     if (signal.aborted) return;
     if (resp.status < 200 || resp.status >= 300) {
-      throw new Error(`API ${resp.status}: ${resp.text || "request failed"}`);
+      throw apiError(resp.status, resp.text);
     }
     let content = "";
     let cacheUsage: CacheUsage | undefined;
@@ -704,7 +772,7 @@ export class CompletionService {
     const resp = await this.request(url, this.body(params, true), signal);
     if (signal.aborted) return;
     if (resp.status < 200 || resp.status >= 300) {
-      throw new Error(`API ${resp.status}: ${resp.text || "request failed"}`);
+      throw apiError(resp.status, resp.text);
     }
     const deltas = parseSSEBody(resp.text);
     const state = newStreamState(streamPrefillThinking(this.settings()));

@@ -17,6 +17,7 @@ export interface GhostwriterSettings {
   maxTokens: number;
   maxWords: number;
   temperature: number;
+  requestTimeoutSec: number;
   systemPrompt: string;
   promptTemplate: string;
   extraPrompt: string;
@@ -36,6 +37,8 @@ export interface GhostwriterSettings {
   recallLevel: number;
   adjacentDepth: number;
   adjacentMaxNotes: number;
+  adjacentNoteChars: number;
+  adjacentTotalChars: number;
   stream: boolean;
   cotEnabled: boolean;
   cotTemplate: string;
@@ -45,6 +48,8 @@ export interface GhostwriterSettings {
   promptTemplateRole: MessageRole;
   previewMode: boolean;
   peekCoT: boolean;
+  novelMode: boolean;
+  novelSummaryPrompt: string;
   acceptKey: string;
   dismissKey: string;
 }
@@ -120,6 +125,14 @@ Write a concise, faithful summary of the user's note. Rules:
 
 export type PromptLanguage = "en" | "zh";
 
+export const DEFAULT_NOVEL_SUMMARY_PROMPT = `你是小说的情节摘要引擎。请为给定段落生成一段情节摘要。
+规则：
+- 只记录客观发生的事件与剧情：谁、在哪、做了什么、发生了什么转折、关键对话与信息。
+- 禁止升华：不要归纳主题、寓意、情感基调或写作手法，不要评价，不要建议。
+- 不遗漏关键伏笔、人物动机变化与新出场人物。
+- 摘要不超过 {max_words} 字，使用与原文相同的语言。
+- 只输出摘要文本本身，不要任何标题、前后缀或解释。`;
+
 export interface PromptBundle {
   systemPrompt: string;
   promptTemplate: string;
@@ -168,6 +181,7 @@ export const DEFAULT_SETTINGS: GhostwriterSettings = {
   maxTokens: 8192,
   maxWords: 100,
   temperature: 0.7,
+  requestTimeoutSec: 120,
   systemPrompt: DEFAULT_SYSTEM_PROMPT,
   promptTemplate: DEFAULT_PROMPT_TEMPLATE,
   extraPrompt: "",
@@ -178,7 +192,7 @@ export const DEFAULT_SETTINGS: GhostwriterSettings = {
   summaryDisabledPaths: [],
   summaryFolder: "summaries",
   summaryModel: "gpt-4o-mini",
-  summaryMaxTokens: 200,
+  summaryMaxTokens: 4096,
   summaryMaxWords: 100,
   summaryTemperature: 0.3,
   summaryInputChars: 8000,
@@ -187,6 +201,8 @@ export const DEFAULT_SETTINGS: GhostwriterSettings = {
   recallLevel: 1,
   adjacentDepth: 1,
   adjacentMaxNotes: 20,
+  adjacentNoteChars: 1500,
+  adjacentTotalChars: 12000,
   stream: true,
   cotEnabled: false,
   cotTemplate: DEFAULT_COT_TEMPLATE,
@@ -196,6 +212,8 @@ export const DEFAULT_SETTINGS: GhostwriterSettings = {
   promptTemplateRole: "user",
   previewMode: false,
   peekCoT: false,
+  novelMode: false,
+  novelSummaryPrompt: DEFAULT_NOVEL_SUMMARY_PROMPT,
   acceptKey: "Shift+Insert",
   dismissKey: "Escape",
 };

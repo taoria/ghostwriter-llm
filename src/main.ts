@@ -5,7 +5,8 @@ import { GhostwriterSettingTab } from "./settingsTab";
 import { CacheUsage, CompletionService, CompletionParams, formatCacheUsage, fetchModels } from "./completionService";
 import { clearGhostEffect, getGhost, ghostExtension, setGhostEffect, GhostState } from "./ghostText";
 import { ghostKeymap } from "./keymap";
-import { getPrefixSuffix } from "./util";
+import { getPrefixSuffix, parseInNoteSummaries } from "./util";
+import { DEFAULT_NOVEL_SUMMARY_PROMPT } from "./settings";
 import { GhostPopup } from "./popup";
 import { PreviewCard } from "./previewCard";
 import { SummaryService, SummaryEntry } from "./summaryService";
@@ -133,6 +134,15 @@ export default class GhostwriterPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "generate-in-note-summary",
+      name: "Generate In-Note Summary",
+      hotkeys: [{ modifiers: ["Mod", "Shift"], key: "S" }],
+      editorCallback: (editor: Editor) => {
+        void this.generateInNoteSummary(editor);
+      },
+    });
+
+    this.addCommand({
       id: "toggle-summary-injection",
       name: "Toggle summary injection (session)",
       callback: () => {
@@ -167,10 +177,12 @@ export default class GhostwriterPlugin extends Plugin {
           if (summary) {
              new Notice("Summary saved.");
           } else {
-            new Notice("Summary generation failed.");
+            new Notice("Summary cancelled.");
           }
         } catch (err) {
-          new Notice(`Summary generation error: ${(err as Error).message}`);
+          if (ac.signal.aborted) return;
+          console.error("[ghostwriter] summary generation failed", err);
+          new Notice(`Summary generation failed: ${(err as Error).message}`, 10000);
         } finally {
           this.currentAbort = null;
         }
@@ -243,6 +255,10 @@ export default class GhostwriterPlugin extends Plugin {
     this.settings.recallLevel = Math.min(3, Math.max(0, Number.isFinite(lvl) ? lvl : 1));
     this.settings.adjacentDepth = Math.max(1, Math.floor(Number(this.settings.adjacentDepth ?? 1)) || 1);
     this.settings.adjacentMaxNotes = Math.max(1, Math.floor(Number(this.settings.adjacentMaxNotes ?? 20)) || 20);
+    this.settings.adjacentNoteChars = Math.max(200, Math.floor(Number(this.settings.adjacentNoteChars ?? 1500)) || 1500);
+    this.settings.adjacentTotalChars = Math.max(200, Math.floor(Number(this.settings.adjacentTotalChars ?? 12000)) || 12000);
+    const tSec = Math.floor(Number(this.settings.requestTimeoutSec ?? 120));
+    this.settings.requestTimeoutSec = Math.max(5, Number.isFinite(tSec) ? tSec : 120);
     await this.saveSettings();
   }
 
@@ -323,14 +339,14 @@ export default class GhostwriterPlugin extends Plugin {
     }
 
     const title = this.getActiveNoteTitle();
-    const windowChars = this.contextWindowChars();
-    const { prefix, suffix } = getPrefixSuffix(editor, windowChars.prefix, windowChars.suffix);
+    const ctx = this.buildContext(editor);
     const params: CompletionParams = {
-      prefix,
-      suffix,
+      prefix: ctx.prefix,
+      suffix: ctx.suffix,
       summary,
       title,
       instruction,
+      novelContext: ctx.novelContext,
     };
 
     this.currentParams = params;
@@ -418,6 +434,40 @@ export default class GhostwriterPlugin extends Plugin {
     return Math.min(3, Math.max(0, Number.isFinite(lvl) ? lvl : 1));
   }
 
+  /**
+   * Build the cursor context. In Novel mode the full text before the cursor is scanned
+   * for in-note summary blocks (`> [Summary] …`): when found, the summarized text is not
+   * sent raw — the summaries plus the unsummarized tail after the last one are sent
+   * instead (tail goes to {prefix}, summaries to novelContext which is appended at the
+   * end of the prompt). Without any summaries the full preceding text is sent as-is.
+   */
+  private buildContext(editor: Editor): { prefix: string; suffix: string; novelContext: string } {
+    const cursor = editor.getCursor("head");
+    const lastLineNum = editor.lastLine();
+    const docEnd = { line: lastLineNum, ch: editor.getLine(lastLineNum).length };
+    const suffix = editor.getRange(cursor, docEnd).slice(0, Math.max(0, this.settings.suffixChars));
+
+    if (!this.settings.novelMode) {
+      const windowChars = this.contextWindowChars();
+      const { prefix } = getPrefixSuffix(editor, windowChars.prefix, windowChars.suffix);
+      return { prefix, suffix, novelContext: "" };
+    }
+
+    const fullPrefix = editor.getRange({ line: 0, ch: 0 }, cursor);
+    const parsed = parseInNoteSummaries(fullPrefix);
+    if (!parsed.hasAny) {
+      // No in-note summaries at all: send the full preceding text.
+      return { prefix: fullPrefix, suffix, novelContext: "" };
+    }
+
+    // Summaries found: drop the covered preceding text, keep the unsummarized tail.
+    const cap = Math.max(0, this.settings.prefixChars);
+    let tail = parsed.tail.replace(/^[\s\r\n]+/, "").replace(/[\s\r\n]+$/, "");
+    if (cap > 0 && tail.length > cap) tail = tail.slice(tail.length - cap);
+    const novelContext = parsed.summaries.map((s, idx) => `[Summary ${idx + 1}] ${s}`).join("\n");
+    return { prefix: tail, suffix, novelContext };
+  }
+
   /** Cursor context window; level 3 recalls the full note instead of the truncated window. */
   private contextWindowChars(): { prefix: number; suffix: number } {
     if (this.recallLevel() >= 3) {
@@ -467,18 +517,23 @@ export default class GhostwriterPlugin extends Plugin {
     }
 
     const folder = (this.settings.summaryFolder ?? "").trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+    const noteCap = Math.max(200, Math.floor(this.settings.adjacentNoteChars || 1500));
+    let remaining = Math.max(noteCap, Math.floor(this.settings.adjacentTotalChars || 12000));
     const sorted = [...frontier].sort((a, b) => a.localeCompare(b));
     const blocks: string[] = [];
     for (const path of sorted) {
-      if (blocks.length >= maxNotes || signal.aborted) break;
+      if (blocks.length >= maxNotes || signal.aborted || remaining <= 0) break;
       if (path === current.path || !path.toLowerCase().endsWith(".md")) continue;
       if (folder && path.startsWith(`${folder}/`)) continue;
       const f = this.app.vault.getAbstractFileByPath(path);
       if (!(f instanceof TFile)) continue;
       try {
         const content = await this.app.vault.cachedRead(f);
-        const clipped = content.slice(0, Math.max(this.settings.summaryInputChars, 100)).trim();
-        if (clipped) blocks.push(`[Note: ${f.basename}]\n${clipped}`);
+        const clipped = content.slice(0, Math.min(noteCap, remaining)).trim();
+        if (clipped) {
+          blocks.push(`[Note: ${f.basename}]\n${clipped}`);
+          remaining -= clipped.length;
+        }
       } catch {
         // Skip unreadable files.
       }
@@ -667,7 +722,7 @@ export default class GhostwriterPlugin extends Plugin {
           this.currentAbort = null;
           this.clearGhostInView(view);
           this.popup.hide();
-          new Notice(`LLM completion failed: ${err.message}`);
+          new Notice(`LLM completion failed: ${err.message}`, 10000);
         },
       },
       ac.signal
@@ -776,6 +831,46 @@ export default class GhostwriterPlugin extends Plugin {
     this.currentParams = null;
   }
 
+  /**
+   * Novel mode: summarize the selected paragraph(s) and append the result
+   * right after them as `> [Summary] …`.
+   */
+  private async generateInNoteSummary(editor: Editor): Promise<void> {
+    if (!editor.somethingSelected()) {
+      new Notice("Select the paragraph(s) to summarize first");
+      return;
+    }
+    const from = editor.getCursor("from");
+    const to = editor.getCursor("to");
+    const lineFrom = { line: from.line, ch: 0 };
+    const lineTo = { line: to.line, ch: editor.getLine(to.line).length };
+    const text = editor.getRange(lineFrom, lineTo).trim();
+    if (!text) {
+      new Notice("Select the paragraph(s) to summarize first");
+      return;
+    }
+
+    const ac = new AbortController();
+    new Notice("Generating in-note summary…");
+    try {
+      const summary = await this.summaryService.generateForText(text, ac.signal, {
+        systemPrompt: this.settings.novelSummaryPrompt || DEFAULT_NOVEL_SUMMARY_PROMPT,
+        maxWords: this.settings.summaryMaxWords,
+      });
+      if (ac.signal.aborted) return;
+      const oneLiner = summary.replace(/\s*\r?\n\s*/g, " ").trim();
+      const snippet = `\n\n> [Summary] ${oneLiner}`;
+      editor.replaceRange(snippet, lineTo, lineTo);
+      const endOffset = editor.posToOffset(lineTo) + snippet.length;
+      editor.setCursor(editor.offsetToPos(endOffset));
+      new Notice("Summary added after paragraph.");
+    } catch (err) {
+      if (ac.signal.aborted || (err as Error).name === "AbortError") return;
+      console.error("[ghostwriter] in-note summary failed", err);
+      new Notice(`In-note summary failed: ${(err as Error).message}`, 10000);
+    }
+  }
+
   private async regenerate() {
     const view = this.currentView;
     const editor = this.currentEditor;
@@ -802,10 +897,10 @@ export default class GhostwriterPlugin extends Plugin {
     }
     const cursorPos = view.state.selection.main.head;
     this.currentPos = cursorPos;
-    const windowChars = this.contextWindowChars();
-    const context = getPrefixSuffix(editor, windowChars.prefix, windowChars.suffix);
-    params.prefix = context.prefix;
-    params.suffix = context.suffix;
+    const ctx = this.buildContext(editor);
+    params.prefix = ctx.prefix;
+    params.suffix = ctx.suffix;
+    params.novelContext = ctx.novelContext;
     params.title = this.getActiveNoteTitle();
     if (this.settings.previewMode) {
       this.runPreviewCompletion(params, view, cursorPos, ac);

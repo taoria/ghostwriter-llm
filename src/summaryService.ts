@@ -1,5 +1,6 @@
 import { App, Notice, TFile, TFolder, Vault, requestUrl } from "obsidian";
 import { GhostwriterSettings, DEFAULT_SUMMARY_SYSTEM_PROMPT } from "./settings";
+import { apiError, parseSSEBody } from "./completionService";
 
 export interface SummaryEntry {
   path: string;
@@ -117,12 +118,11 @@ export class SummaryService {
     return changed;
   }
 
-  /** Generate a summary only when explicitly requested, writing a separate summary-N file. */
+  /** Generate a summary only when explicitly requested, writing a separate summary-N file. Throws with a readable reason on failure. */
   async regenerate(file: TFile, signal: AbortSignal): Promise<string | null> {
     const content = await this.app.vault.read(file);
-    const summary = await this.generate(file, content, signal);
-    if (!summary) return null;
-    if (signal.aborted) return null;
+    const summary = await this.generateForText(content, signal);
+    if (signal.aborted || !summary) return null;
     try {
       const existing = await this.findSummaryFile(file.path);
       const path = existing?.path ?? await this.nextSummaryPath();
@@ -172,66 +172,85 @@ export class SummaryService {
     }
   }
 
-  /** Call the summary model with the note content, returning the trimmed text. */
-  private async generate(file: TFile, content: string, signal: AbortSignal): Promise<string | null> {
+  /**
+   * Summarize arbitrary text with the summary model. Throws with a readable reason on failure.
+   * Used for both note summaries (regenerate) and Novel-mode in-note paragraph summaries.
+   */
+  async generateForText(
+    text: string,
+    signal: AbortSignal,
+    opts?: { systemPrompt?: string; maxWords?: number }
+  ): Promise<string> {
     const s = this.settings();
-    if (!s.summaryModel || !s.apiBaseUrl) return null;
-    if (!s.summaryEnabled) return null;
+    if (!s.summaryModel) throw new Error("No summary model configured (Settings → Summary recall → Summary model)");
+    if (!s.apiBaseUrl) throw new Error("No API Base URL configured");
     const url = joinUrl(s.apiBaseUrl, "chat/completions");
-    const sys = DEFAULT_SUMMARY_SYSTEM_PROMPT.replace(/\{max_words\}/g, String(s.summaryMaxWords));
-    const noteText = content.slice(0, Math.max(s.summaryInputChars, 100));
-    const body = JSON.stringify({
-      model: s.summaryModel,
-      messages: [
-        { role: "system", content: sys },
-        { role: "user", content: noteText },
-      ],
-      max_tokens: s.summaryMaxTokens,
-      temperature: s.summaryTemperature,
-      stream: false,
-    });
+    const maxWords = opts?.maxWords ?? s.summaryMaxWords;
+    const sys = (opts?.systemPrompt ?? DEFAULT_SUMMARY_SYSTEM_PROMPT).replace(/\{max_words\}/g, String(maxWords));
+    const noteText = text.slice(0, Math.max(s.summaryInputChars, 100));
+    const timeoutSec = Math.max(5, Math.floor(Number(s.requestTimeoutSec ?? 120) || 120));
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (s.apiKey) headers["Authorization"] = `Bearer ${s.apiKey}`;
 
-    const reqPromise = requestUrl({
-      url,
-      method: "POST",
-      headers,
-      contentType: "application/json",
-      body,
-      throw: false,
-    });
-
-    return new Promise<string | null>((resolve) => {
-      const onAbort = () => resolve(null);
-      if (signal.aborted) {
-        onAbort();
-        return;
-      }
-      signal.addEventListener("abort", onAbort, { once: true });
-      reqPromise.then(
-        (r) => {
-          signal.removeEventListener("abort", onAbort);
-          if (r.status < 200 || r.status >= 300) {
-            new Notice(`Summary API ${r.status}: ${r.text?.slice(0, 200) ?? "request failed"}`);
-            resolve(null);
-            return;
-          }
-          let text = "";
-          try {
-            const json = JSON.parse(r.text);
-            text = json?.choices?.[0]?.message?.content ?? "";
-          } catch {
-            text = "";
-          }
-          resolve((text ?? "").trim());
-        },
-        () => {
-          signal.removeEventListener("abort", onAbort);
-          resolve(null);
+    // Streamed like completions: some providers reject non-streamed requests whose
+    // body contains typographic quotes (HTTP 500), and SSE is the reliable path.
+    const attempt = async (maxTokens: number): Promise<{ text: string; finishReason: string }> => {
+      const body = JSON.stringify({
+        model: s.summaryModel,
+        messages: [
+          { role: "system", content: sys },
+          { role: "user", content: noteText },
+        ],
+        max_tokens: maxTokens,
+        temperature: s.summaryTemperature,
+        stream: true,
+      });
+      const reqPromise = requestUrl({ url, method: "POST", headers, contentType: "application/json", body, throw: false });
+      const resp = await new Promise<{ status: number; text: string }>((resolve, reject) => {
+        const onAbort = () => reject(new DOMException("Aborted", "AbortError"));
+        if (signal.aborted) {
+          onAbort();
+          return;
         }
+        signal.addEventListener("abort", onAbort, { once: true });
+        const timer = setTimeout(() => reject(new Error(`Summary request timed out after ${timeoutSec}s`)), timeoutSec * 1000);
+        reqPromise.then(
+          (r) => {
+            signal.removeEventListener("abort", onAbort);
+            clearTimeout(timer);
+            resolve({ status: r.status, text: r.text });
+          },
+          (e) => {
+            signal.removeEventListener("abort", onAbort);
+            clearTimeout(timer);
+            reject(e);
+          }
+        );
+      });
+      if (resp.status < 200 || resp.status >= 300) throw apiError(resp.status, resp.text);
+      let text = "";
+      let finishReason = "";
+      for (const ev of parseSSEBody(resp.text)) {
+        if (ev.delta) text += ev.delta;
+        if (ev.finishReason) finishReason = ev.finishReason;
+      }
+      return { text: text.trim(), finishReason };
+    };
+
+    let maxTokens = Math.max(64, Math.floor(Number(s.summaryMaxTokens) || 200));
+    let result = await attempt(maxTokens);
+    // Reasoning models can burn the whole token budget on thinking and return empty content.
+    while (!result.text && result.finishReason === "length" && maxTokens < 8192) {
+      maxTokens = Math.min(8192, maxTokens * 4);
+      console.warn(`[ghostwriter] summary empty (finish_reason=length); retrying with max_tokens=${maxTokens}`);
+      result = await attempt(maxTokens);
+    }
+    if (!result.text) {
+      throw new Error(
+        `Summary model returned empty content (finish_reason: ${result.finishReason || "unknown"}). Raise "Summary max tokens" or choose a non-reasoning summary model.`
       );
-    });
+    }
+    return result.text;
   }
 }
 

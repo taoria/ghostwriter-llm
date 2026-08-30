@@ -8,6 +8,7 @@ import {
   DEFAULT_PROMPT_TEMPLATE,
   DEFAULT_COT_TEMPLATE,
   DEFAULT_COT_TRIGGER,
+  DEFAULT_NOVEL_SUMMARY_PROMPT,
   defaultPromptsFor,
   PromptLanguage,
   PromptBundle,
@@ -179,10 +180,6 @@ export class GhostwriterSettingTab extends PluginSettingTab {
 
     const active = activeProfile();
     if (active) {
-      let fetchedModels: string[] = [];
-      let modelText: TextComponent | null = null;
-      let modelDropdown: DropdownComponent | null = null;
-
       new Setting(containerEl)
         .setName("Profile name")
         .setDesc("Display name of the active provider.")
@@ -216,69 +213,36 @@ export class GhostwriterSettingTab extends PluginSettingTab {
             });
         });
 
-      const renderModelPick = (): void => {
-        pickContainer.empty();
-        modelDropdown = null;
-        if (!fetchedModels.length) return;
-        new Setting(pickContainer)
-          .setName("Fetched models")
-          .setDesc(`${fetchedModels.length} models reported by ${active.apiBaseUrl || "the endpoint"}. Pick one to fill the Model field.`)
-          .addDropdown((dd) => {
-            modelDropdown = dd;
-            dd.addOption("", "-- select a model --");
-            for (const m of fetchedModels) dd.addOption(m, m);
-            dd.setValue(fetchedModels.includes(active.model) ? active.model : "");
-            dd.onChange(async (m) => {
-              if (!m) return;
-              await syncActive({ model: m });
-              modelText?.setValue(m);
-            });
-          });
-      };
-
-      const modelSetting = new Setting(containerEl)
-        .setName("Model")
-        .setDesc("Type a model id manually, or fetch the list from the provider and pick one.")
-        .addText((text) => {
-          modelText = text;
-          text
-            .setPlaceholder("gpt-4o-mini")
-            .setValue(active.model)
-            .onChange(async (value) => {
-              await syncActive({ model: value.trim() });
-              const v = value.trim();
-              modelDropdown?.setValue(fetchedModels.includes(v) ? v : "");
-            });
-        })
-        .addButton((btn) => {
-          btn.setButtonText("Fetch models").onClick(async () => {
-            if (!active.apiBaseUrl.trim()) {
-              new Notice("Set an API Base URL first");
-              return;
-            }
-            btn.setDisabled(true).setButtonText("Fetching…");
-            try {
-              fetchedModels = await fetchModels(active.apiBaseUrl, active.apiKey);
-              if (!fetchedModels.length) new Notice("The provider returned no models");
-              else new Notice(`Found ${fetchedModels.length} models`);
-            } catch (err) {
-              new Notice(`Fetch models failed: ${(err as Error).message}`);
-            } finally {
-              btn.setDisabled(false).setButtonText("Fetch models");
-              renderModelPick();
-            }
-          });
-        });
-
-      // Place the fetched-models dropdown right below the Model row,
-      // not at the end of the whole settings container.
-      const pickContainer = document.createElement("div");
-      pickContainer.className = "ghostwriter-model-pick";
-      modelSetting.settingEl.insertAdjacentElement("afterend", pickContainer);
-      renderModelPick();
+      this.addModelFieldWithFetch(
+        containerEl,
+        "Model",
+        "Type a model id manually, or fetch the list from the provider and pick one.",
+        {
+          get: () => active.model,
+          set: async (value) => {
+            await syncActive({ model: value });
+          },
+          placeholder: "gpt-4o-mini",
+        }
+      );
     }
 
     section("Generation limits", "Request limits shared by every provider.");
+
+    new Setting(containerEl)
+      .setName("Request timeout (sec)")
+      .setDesc("Abort the request and show an error if the provider does not finish within this time. Prevents an endless Generating state.")
+      .addText((text) =>
+        text
+          .setValue(String(this.plugin.settings.requestTimeoutSec))
+          .onChange(async (value) => {
+            const n = Number(value);
+            if (Number.isFinite(n) && n >= 5) {
+              this.plugin.settings.requestTimeoutSec = Math.floor(n);
+              await this.plugin.saveSettings();
+            }
+          })
+      );
 
     new Setting(containerEl)
       .setName("Max tokens")
@@ -456,6 +420,36 @@ export class GhostwriterSettingTab extends PluginSettingTab {
           })
       );
 
+    new Setting(containerEl)
+      .setName("Adjacent note chars")
+      .setDesc("Per-note character cap for adjacent note blocks (recall level 2/3).")
+      .addText((text) =>
+        text
+          .setValue(String(this.plugin.settings.adjacentNoteChars))
+          .onChange(async (value) => {
+            const n = Number(value);
+            if (Number.isFinite(n) && n >= 200) {
+              this.plugin.settings.adjacentNoteChars = Math.floor(n);
+              await this.plugin.saveSettings();
+            }
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Adjacent total chars")
+      .setDesc("Overall character budget for all adjacent note blocks combined (recall level 2/3). Keeps the prompt within the model's context window.")
+      .addText((text) =>
+        text
+          .setValue(String(this.plugin.settings.adjacentTotalChars))
+          .onChange(async (value) => {
+            const n = Number(value);
+            if (Number.isFinite(n) && n >= 200) {
+              this.plugin.settings.adjacentTotalChars = Math.floor(n);
+              await this.plugin.saveSettings();
+            }
+          })
+      );
+
     section("Summary recall", "Inject manually generated summaries from the configured summary folder into completion context.");
     new Setting(containerEl)
       .setName("Manual fallback summary")
@@ -535,22 +529,23 @@ export class GhostwriterSettingTab extends PluginSettingTab {
           })
       );
 
-    new Setting(containerEl)
-      .setName("Summary model")
-      .setDesc("The model used to generate summaries (typically a cheaper/faster one such as gpt-4o-mini). Uses the same API Base URL and API Key as completion.")
-      .addText((text) =>
-        text
-          .setPlaceholder("gpt-4o-mini")
-          .setValue(this.plugin.settings.summaryModel)
-          .onChange(async (value) => {
-            this.plugin.settings.summaryModel = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
+    this.addModelFieldWithFetch(
+      containerEl,
+      "Summary model",
+      "The model used to generate summaries (typically a cheaper/faster one such as gpt-4o-mini). Fetch models uses the active provider's Base URL and API key.",
+      {
+        get: () => this.plugin.settings.summaryModel,
+        set: async (value) => {
+          this.plugin.settings.summaryModel = value;
+          await this.plugin.saveSettings();
+        },
+        placeholder: "gpt-4o-mini",
+      }
+    );
 
     new Setting(containerEl)
       .setName("Summary max tokens")
-      .setDesc("API-side token cap for a single summary generation.")
+      .setDesc("API-side token cap for a single summary generation. Reasoning models spend tokens on hidden thinking before writing the summary — keep this generous (default 4096). If it is exhausted the plugin auto-retries with a larger budget.")
       .addText((text) =>
         text
           .setValue(String(this.plugin.settings.summaryMaxTokens))
@@ -677,6 +672,33 @@ export class GhostwriterSettingTab extends PluginSettingTab {
         });
       });
 
+    section("Novel mode", "Paragraph-level in-note summaries for fiction writing.");
+    new Setting(containerEl)
+      .setName("Novel mode")
+      .setDesc("When on, continuations scan the full text before the cursor for in-note summary blocks (`> [Summary] …`). If any are found, the summarized text is not sent raw: all summaries plus the unsummarized text after the last one are sent instead, and the summary block is always appended at the end of the prompt. With no summaries present the full preceding text is sent as-is.")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.novelMode)
+          .onChange(async (value) => {
+            this.plugin.settings.novelMode = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Novel summary prompt")
+      .setDesc("System prompt used by “Generate In-Note Summary” (records events and plot, no thematic elevation). Placeholder: {max_words}.")
+      .addTextArea((text) => {
+        text.inputEl.rows = 7;
+        text.inputEl.cols = 60;
+        text
+          .setValue(this.plugin.settings.novelSummaryPrompt || DEFAULT_NOVEL_SUMMARY_PROMPT)
+          .onChange(async (value) => {
+            this.plugin.settings.novelSummaryPrompt = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
     section("Display & shortcuts", "Choose how suggestions are shown and configure the keys used to accept or dismiss them.");
     new Setting(containerEl)
       .setName("Preview mode")
@@ -739,6 +761,86 @@ export class GhostwriterSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+  }
+
+  /** Base URL / API key of the active provider profile (falls back to top-level fields). */
+  private activeConnection(): { apiBaseUrl: string; apiKey: string } {
+    const st = this.plugin.settings;
+    const p = st.providers.find((x) => x.id === st.activeProviderId);
+    return { apiBaseUrl: p?.apiBaseUrl ?? st.apiBaseUrl, apiKey: p?.apiKey ?? st.apiKey };
+  }
+
+  /** Text field + "Fetch models" button; the fetched-models dropdown is placed right below the row. */
+  private addModelFieldWithFetch(
+    container: HTMLElement,
+    name: string,
+    desc: string,
+    opts: { get: () => string; set: (value: string) => Promise<void>; placeholder: string }
+  ): void {
+    let fetchedModels: string[] = [];
+    let textComp: TextComponent | null = null;
+    let dropdown: DropdownComponent | null = null;
+
+    const renderPick = (): void => {
+      pickContainer.empty();
+      dropdown = null;
+      if (!fetchedModels.length) return;
+      new Setting(pickContainer)
+        .setName("Fetched models")
+        .setDesc(`${fetchedModels.length} models reported by the endpoint. Pick one to fill the field.`)
+        .addDropdown((dd) => {
+          dropdown = dd;
+          dd.addOption("", "-- select a model --");
+          for (const m of fetchedModels) dd.addOption(m, m);
+          const cur = opts.get();
+          dd.setValue(fetchedModels.includes(cur) ? cur : "");
+          dd.onChange(async (m) => {
+            if (!m) return;
+            await opts.set(m);
+            textComp?.setValue(m);
+          });
+        });
+    };
+
+    const setting = new Setting(container)
+      .setName(name)
+      .setDesc(desc)
+      .addText((text) => {
+        textComp = text;
+        text
+          .setPlaceholder(opts.placeholder)
+          .setValue(opts.get())
+          .onChange(async (value) => {
+            await opts.set(value.trim());
+            const v = value.trim();
+            dropdown?.setValue(fetchedModels.includes(v) ? v : "");
+          });
+      })
+      .addButton((btn) => {
+        btn.setButtonText("Fetch models").onClick(async () => {
+          const { apiBaseUrl, apiKey } = this.activeConnection();
+          if (!apiBaseUrl.trim()) {
+            new Notice("Set an API Base URL first");
+            return;
+          }
+          btn.setDisabled(true).setButtonText("Fetching…");
+          try {
+            fetchedModels = await fetchModels(apiBaseUrl, apiKey);
+            if (!fetchedModels.length) new Notice("The provider returned no models");
+            else new Notice(`Found ${fetchedModels.length} models`);
+          } catch (err) {
+            new Notice(`Fetch models failed: ${(err as Error).message}`);
+          } finally {
+            btn.setDisabled(false).setButtonText("Fetch models");
+            renderPick();
+          }
+        });
+      });
+
+    const pickContainer = document.createElement("div");
+    pickContainer.className = "ghostwriter-model-pick";
+    setting.settingEl.insertAdjacentElement("afterend", pickContainer);
+    renderPick();
   }
 
   private async exportPrompts(): Promise<void> {

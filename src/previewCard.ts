@@ -17,6 +17,8 @@ export class PreviewCard extends Modal {
   private completionEl: HTMLElement | null = null;
   private cacheUsageEl: HTMLElement | null = null;
   private statusEl: HTMLElement | null = null;
+  private errorEl: HTMLElement | null = null;
+  private errorBodyEl: HTMLElement | null = null;
   private actionsEl: HTMLElement | null = null;
   private acceptBtn: HTMLButtonElement | null = null;
   private rejectBtn: HTMLButtonElement | null = null;
@@ -57,6 +59,15 @@ export class PreviewCard extends Modal {
     const cacheUsage = contentEl.createDiv({ cls: "llm-preview-cache-usage" });
     cacheUsage.setText("Prompt cache: waiting for usage data");
     this.cacheUsageEl = cacheUsage;
+
+    const errorSection = contentEl.createDiv({ cls: "llm-preview-section llm-preview-error" });
+    errorSection.style.display = "none";
+    errorSection.createDiv({ cls: "llm-preview-section-header" }).setText("Error");
+    const errorBody = errorSection.createDiv({ cls: "llm-preview-section-body llm-preview-error-body" });
+    const errorHint = errorSection.createDiv({ cls: "llm-preview-error-hint" });
+    errorHint.setText("Full details are in the developer console (Ctrl+Shift+I / Cmd+Opt+I). Check the model, base URL, API key, and request size (recall level / adjacent notes) if this keeps happening.");
+    this.errorEl = errorSection;
+    this.errorBodyEl = errorBody;
 
     const promptWrap = contentEl.createDiv({ cls: "llm-preview-prompt-wrap" });
     const promptToggle = promptWrap.createDiv({ cls: "llm-preview-prompt-toggle" });
@@ -177,10 +188,10 @@ export class PreviewCard extends Modal {
 
   showError(message: string): void {
     this.finished = true;
-    if (this.statusEl) {
-      this.statusEl.empty();
-      this.statusEl.setText(`Error: ${message}`);
-      this.statusEl.addClass("is-error");
+    if (this.statusEl) this.statusEl.style.display = "none";
+    if (this.errorEl && this.errorBodyEl) {
+      this.errorEl.style.display = "";
+      this.errorBodyEl.setText(message);
     }
     if (this.actionsEl) this.actionsEl.style.display = "";
     if (this.acceptBtn) this.acceptBtn.disabled = true;
