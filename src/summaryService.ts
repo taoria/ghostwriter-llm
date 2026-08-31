@@ -81,6 +81,44 @@ export class SummaryService {
     return entries;
   }
 
+  /**
+   * Enumerate every managed summary file with its parse result, including files
+   * that cannot be previewed/injected (missing frontmatter, no source, empty body…).
+   */
+  async listFileStates(
+    limit: number
+  ): Promise<Array<{ file: TFile; entry: SummaryEntry | null; reason: string }>> {
+    const files = this.summaryFiles().slice(0, Math.max(0, limit));
+    const out: Array<{ file: TFile; entry: SummaryEntry | null; reason: string }> = [];
+    for (const f of files) {
+      let raw = "";
+      try {
+        raw = await this.app.vault.cachedRead(f);
+      } catch {
+        out.push({ file: f, entry: null, reason: "file could not be read" });
+        continue;
+      }
+      const parsed = this.parseSummaryFile(raw, f.basename);
+      if (parsed) {
+        out.push({
+          file: f,
+          entry: { path: parsed.source, summaryFilePath: f.path, title: parsed.title, summary: parsed.summary },
+          reason: "",
+        });
+        continue;
+      }
+      let reason = "missing frontmatter block";
+      const fm = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+      if (fm) {
+        if (!/^source:\s*\S/m.test(fm[1])) reason = "frontmatter has no source line";
+        else if (!raw.slice(fm[0].length).trim()) reason = "summary body is empty";
+        else reason = "invalid format (unreadable source or empty body)";
+      }
+      out.push({ file: f, entry: null, reason });
+    }
+    return out;
+  }
+
   async findForFile(file: TFile): Promise<SummaryEntry | null> {
     for (const summaryFile of this.summaryFiles()) {
       const entry = await this.readEntry(summaryFile);

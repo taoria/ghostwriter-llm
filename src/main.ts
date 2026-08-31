@@ -10,6 +10,7 @@ import { DEFAULT_NOVEL_SUMMARY_PROMPT } from "./settings";
 import { GhostPopup } from "./popup";
 import { PreviewCard } from "./previewCard";
 import { SummaryService, SummaryEntry } from "./summaryService";
+import { SummaryOpRecord, SummaryStatusModal } from "./summaryStatusModal";
 
 class InstructionModal extends Modal {
   private onSubmit: (instruction: string) => void;
@@ -79,8 +80,11 @@ export default class GhostwriterPlugin extends Plugin {
   private statusBarEl: HTMLElement | null = null;
   private currentSummaryStatusBarEl: HTMLElement | null = null;
   private cacheStatusBarEl: HTMLElement | null = null;
+  private summaryOpStatusBarEl: HTMLElement | null = null;
   private lastCacheUsage: CacheUsage | undefined;
   private cacheUsageKnown: boolean = false;
+  /** In-session history of summary generation operations (newest first). */
+  summaryOps: SummaryOpRecord[] = [];
 
   async onload() {
     await this.loadSettings();
@@ -143,6 +147,14 @@ export default class GhostwriterPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "show-summary-status",
+      name: "Show summary status",
+      callback: () => {
+        this.openSummaryStatus();
+      },
+    });
+
+    this.addCommand({
       id: "toggle-summary-injection",
       name: "Toggle summary injection (session)",
       callback: () => {
@@ -172,16 +184,23 @@ export default class GhostwriterPlugin extends Plugin {
         new Notice("Generating summary…");
         const ac = new AbortController();
         this.currentAbort = ac;
+        const rec = this.beginSummaryOp("note-summary", f.path);
         try {
           const summary = await this.summaryService.regenerate(f, ac.signal);
           if (summary) {
+             this.finishSummaryOp(rec, "success", "saved to summaries folder");
              new Notice("Summary saved.");
           } else {
+            this.finishSummaryOp(rec, "failed", "cancelled");
             new Notice("Summary cancelled.");
           }
         } catch (err) {
-          if (ac.signal.aborted) return;
+          if (ac.signal.aborted) {
+            this.finishSummaryOp(rec, "failed", "cancelled");
+            return;
+          }
           console.error("[ghostwriter] summary generation failed", err);
+          this.finishSummaryOp(rec, "failed", (err as Error).message);
           new Notice(`Summary generation failed: ${(err as Error).message}`, 10000);
         } finally {
           this.currentAbort = null;
@@ -224,7 +243,63 @@ export default class GhostwriterPlugin extends Plugin {
     this.cacheStatusBarEl.setAttribute("aria-label", "Prompt cache hit rate from the last completion");
     this.updateStatusBar();
 
+    this.summaryOpStatusBarEl = this.addStatusBarItem();
+    this.summaryOpStatusBarEl.addClass("ghostwriter-status", "ghostwriter-summaryop-status");
+    this.summaryOpStatusBarEl.setAttribute("aria-label", "Summary generation status (click to open)");
+    this.summaryOpStatusBarEl.addEventListener("click", () => {
+      new SummaryStatusModal(this.app, this).open();
+    });
+
     this.addSettingTab(new GhostwriterSettingTab(this.app, this));
+  }
+
+  beginSummaryOp(kind: SummaryOpRecord["kind"], target: string): SummaryOpRecord {
+    const rec: SummaryOpRecord = { time: Date.now(), kind, target, state: "running", message: "" };
+    this.summaryOps.unshift(rec);
+    if (this.summaryOps.length > 30) this.summaryOps.length = 30;
+    this.updateSummaryOpStatus();
+    return rec;
+  }
+
+  finishSummaryOp(rec: SummaryOpRecord, state: SummaryOpRecord["state"], message: string): void {
+    rec.state = state;
+    rec.message = message;
+    rec.time = state === "running" ? rec.time : Date.now();
+    this.updateSummaryOpStatus();
+  }
+
+  updateSummaryOpStatus(): void {
+    if (!this.summaryOpStatusBarEl) return;
+    const running = this.summaryOps.find((o) => o.state === "running");
+    const last = this.summaryOps[0];
+    if (running) {
+      this.summaryOpStatusBarEl.setText("Summary: …");
+      this.summaryOpStatusBarEl.toggleClass("is-running", true);
+      this.summaryOpStatusBarEl.toggleClass("is-on", false);
+      this.summaryOpStatusBarEl.toggleClass("is-off", false);
+    } else if (last && last.state === "failed") {
+      this.summaryOpStatusBarEl.setText("Summary: FAIL");
+      this.summaryOpStatusBarEl.toggleClass("is-running", false);
+      this.summaryOpStatusBarEl.toggleClass("is-on", false);
+      this.summaryOpStatusBarEl.toggleClass("is-off", false);
+      this.summaryOpStatusBarEl.toggleClass("is-failed", true);
+    } else if (last && last.state === "success") {
+      this.summaryOpStatusBarEl.setText("Summary: OK");
+      this.summaryOpStatusBarEl.toggleClass("is-running", false);
+      this.summaryOpStatusBarEl.toggleClass("is-on", true);
+      this.summaryOpStatusBarEl.toggleClass("is-off", false);
+      this.summaryOpStatusBarEl.toggleClass("is-failed", false);
+    } else {
+      this.summaryOpStatusBarEl.setText("Summary: idle");
+      this.summaryOpStatusBarEl.toggleClass("is-running", false);
+      this.summaryOpStatusBarEl.toggleClass("is-on", false);
+      this.summaryOpStatusBarEl.toggleClass("is-off", false);
+      this.summaryOpStatusBarEl.toggleClass("is-failed", false);
+    }
+  }
+
+  openSummaryStatus(): void {
+    new SummaryStatusModal(this.app, this).open();
   }
 
   onunload() {
@@ -435,11 +510,12 @@ export default class GhostwriterPlugin extends Plugin {
   }
 
   /**
-   * Build the cursor context. In Novel mode the full text before the cursor is scanned
-   * for in-note summary blocks (`> [Summary] …`): when found, the summarized text is not
-   * sent raw — the summaries plus the unsummarized tail after the last one are sent
-   * instead (tail goes to {prefix}, summaries to novelContext which is appended at the
-   * end of the prompt). Without any summaries the full preceding text is sent as-is.
+   * Build the cursor context. Whenever the full text before the cursor contains
+   * in-note summary blocks (`> [Summary] …`), the summarized text is not sent raw:
+   * the summaries plus the unsummarized tail after the last one are sent instead
+   * (tail → {prefix}, summaries → novelContext, appended at the end of the prompt).
+   * With no summaries present: Novel mode sends the full preceding text; otherwise
+   * the legacy prefix/suffix window is used.
    */
   private buildContext(editor: Editor): { prefix: string; suffix: string; novelContext: string } {
     const cursor = editor.getCursor("head");
@@ -447,25 +523,26 @@ export default class GhostwriterPlugin extends Plugin {
     const docEnd = { line: lastLineNum, ch: editor.getLine(lastLineNum).length };
     const suffix = editor.getRange(cursor, docEnd).slice(0, Math.max(0, this.settings.suffixChars));
 
-    if (!this.settings.novelMode) {
-      const windowChars = this.contextWindowChars();
-      const { prefix } = getPrefixSuffix(editor, windowChars.prefix, windowChars.suffix);
-      return { prefix, suffix, novelContext: "" };
-    }
-
     const fullPrefix = editor.getRange({ line: 0, ch: 0 }, cursor);
     const parsed = parseInNoteSummaries(fullPrefix);
-    if (!parsed.hasAny) {
-      // No in-note summaries at all: send the full preceding text.
+
+    if (parsed.hasAny) {
+      // In-note summaries detected (automatic, independent of the Novel mode toggle).
+      const cap = Math.max(0, this.settings.prefixChars);
+      let tail = parsed.tail.replace(/^[\s\r\n]+/, "").replace(/[\s\r\n]+$/, "");
+      if (cap > 0 && tail.length > cap) tail = tail.slice(tail.length - cap);
+      const novelContext = parsed.summaries.map((s, idx) => `[Summary ${idx + 1}] ${s}`).join("\n");
+      return { prefix: tail, suffix, novelContext };
+    }
+
+    if (this.settings.novelMode) {
+      // Novel mode with no summaries: send the full preceding text.
       return { prefix: fullPrefix, suffix, novelContext: "" };
     }
 
-    // Summaries found: drop the covered preceding text, keep the unsummarized tail.
-    const cap = Math.max(0, this.settings.prefixChars);
-    let tail = parsed.tail.replace(/^[\s\r\n]+/, "").replace(/[\s\r\n]+$/, "");
-    if (cap > 0 && tail.length > cap) tail = tail.slice(tail.length - cap);
-    const novelContext = parsed.summaries.map((s, idx) => `[Summary ${idx + 1}] ${s}`).join("\n");
-    return { prefix: tail, suffix, novelContext };
+    const windowChars = this.contextWindowChars();
+    const { prefix } = getPrefixSuffix(editor, windowChars.prefix, windowChars.suffix);
+    return { prefix, suffix, novelContext: "" };
   }
 
   /** Cursor context window; level 3 recalls the full note instead of the truncated window. */
@@ -852,21 +929,30 @@ export default class GhostwriterPlugin extends Plugin {
 
     const ac = new AbortController();
     new Notice("Generating in-note summary…");
+    const rec = this.beginSummaryOp("in-note-summary", text.slice(0, 40) + (text.length > 40 ? "…" : ""));
     try {
       const summary = await this.summaryService.generateForText(text, ac.signal, {
         systemPrompt: this.settings.novelSummaryPrompt || DEFAULT_NOVEL_SUMMARY_PROMPT,
         maxWords: this.settings.summaryMaxWords,
       });
-      if (ac.signal.aborted) return;
+      if (ac.signal.aborted) {
+        this.finishSummaryOp(rec, "failed", "cancelled");
+        return;
+      }
       const oneLiner = summary.replace(/\s*\r?\n\s*/g, " ").trim();
       const snippet = `\n\n> [Summary] ${oneLiner}`;
       editor.replaceRange(snippet, lineTo, lineTo);
       const endOffset = editor.posToOffset(lineTo) + snippet.length;
       editor.setCursor(editor.offsetToPos(endOffset));
+      this.finishSummaryOp(rec, "success", "inserted after paragraph");
       new Notice("Summary added after paragraph.");
     } catch (err) {
-      if (ac.signal.aborted || (err as Error).name === "AbortError") return;
+      if (ac.signal.aborted || (err as Error).name === "AbortError") {
+        this.finishSummaryOp(rec, "failed", "cancelled");
+        return;
+      }
       console.error("[ghostwriter] in-note summary failed", err);
+      this.finishSummaryOp(rec, "failed", (err as Error).message);
       new Notice(`In-note summary failed: ${(err as Error).message}`, 10000);
     }
   }

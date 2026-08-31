@@ -152,6 +152,145 @@
   color: var(--text-faint);
 }
 
+.status-bar-item.ghostwriter-status.is-running {
+  color: var(--color-yellow, var(--text-accent));
+}
+
+.status-bar-item.ghostwriter-status.is-failed {
+  color: var(--text-error);
+}
+
+/* --- Summary status modal --- */
+
+.gw-summary-status-modal .modal-content {
+  overflow-y: auto;
+}
+
+.gw-sum-badge {
+  display: inline-block;
+  min-width: 1.2em;
+  text-align: center;
+  font-weight: 600;
+}
+
+.gw-sum-badge.is-success,
+.gw-sum-badge.is-ok {
+  color: var(--color-green, var(--text-accent));
+}
+
+.gw-sum-badge.is-failed,
+.gw-sum-badge.is-error {
+  color: var(--text-error);
+}
+
+.gw-sum-badge.is-running {
+  color: var(--color-yellow, var(--text-accent));
+}
+
+.gw-sum-badge.is-off {
+  color: var(--text-muted);
+  font-size: 0.85em;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+.gw-sum-op-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0;
+}
+
+.gw-sum-op-row.is-failed {
+  color: var(--text-error);
+}
+
+.gw-sum-file {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin: 6px 0;
+}
+
+.gw-sum-file.is-bad {
+  border-color: var(--text-error);
+  background: var(--background-modifier-error-hover, transparent);
+}
+
+.gw-sum-file-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.gw-sum-file-name {
+  font-weight: 600;
+}
+
+.gw-sum-file-meta {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  margin-top: 2px;
+}
+
+.gw-sum-file-meta.is-error {
+  color: var(--text-error);
+}
+
+.gw-sum-file-preview {
+  color: var(--text-normal);
+  font-size: var(--font-ui-smaller);
+  margin-top: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 5.5em;
+  overflow-y: auto;
+}
+
+.gw-sum-hist-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: var(--font-ui-smaller);
+}
+
+.gw-sum-hist-row.is-failed {
+  color: var(--text-error);
+}
+
+.gw-sum-hist-time {
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.gw-sum-hist-target {
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gw-sum-hist-msg {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.gw-sum-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.gw-sum-error {
+  color: var(--text-error);
+}
+
 .status-bar-item.ghostwriter-current-summary-status.is-na {
   color: var(--text-faint);
   cursor: default;

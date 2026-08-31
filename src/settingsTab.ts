@@ -480,6 +480,14 @@ export class GhostwriterSettingTab extends PluginSettingTab {
 
     // Per-file switches: disable individual summary-N.md files regardless of their source note.
     const fileListContainer = containerEl.createDiv({ cls: "ghostwriter-summary-files" });
+    new Setting(containerEl)
+      .setName("Summary status")
+      .setDesc("Open the status panel: running / succeeded / failed summary operations (with error reasons) and every summary file, including ones that cannot be previewed or injected.")
+      .addButton((btn) => {
+        btn.setButtonText("Open status panel").onClick(() => {
+          this.plugin.openSummaryStatus();
+        });
+      });
     void (async () => {
       let entries: SummaryEntry[] = [];
       try {
@@ -675,7 +683,7 @@ export class GhostwriterSettingTab extends PluginSettingTab {
     section("Novel mode", "Paragraph-level in-note summaries for fiction writing.");
     new Setting(containerEl)
       .setName("Novel mode")
-      .setDesc("When on, continuations scan the full text before the cursor for in-note summary blocks (`> [Summary] …`). If any are found, the summarized text is not sent raw: all summaries plus the unsummarized text after the last one are sent instead, and the summary block is always appended at the end of the prompt. With no summaries present the full preceding text is sent as-is.")
+      .setDesc("In-note summary blocks (`> [Summary] …`) are always detected automatically: once any exist before the cursor, the summarized text is not sent raw — all summaries plus the unsummarized text after the last one are sent instead, and the summary block is always appended at the end of the prompt. This toggle only controls the no-summary fallback: when on, the full preceding text is sent even without summaries; when off, the normal prefix window is used.")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.novelMode)
