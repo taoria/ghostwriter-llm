@@ -683,7 +683,7 @@ export class GhostwriterSettingTab extends PluginSettingTab {
     section("Novel mode", "Paragraph-level in-note summaries for fiction writing.");
     new Setting(containerEl)
       .setName("Novel mode")
-      .setDesc("In-note summary blocks (`> [Summary] …`) are always detected automatically: once any exist before the cursor, the summarized text is not sent raw — all summaries plus the unsummarized text after the last one are sent instead, and the summary block is always appended at the end of the prompt. This toggle only controls the no-summary fallback: when on, the full preceding text is sent even without summaries; when off, the normal prefix window is used.")
+      .setDesc("In-note summary blocks (`[Summary]` / `[摘要]` markers, anywhere in a line) are always detected automatically: once any exist before the cursor, the summarized text is not sent raw — all summaries are injected immediately before the unsummarized text (both inside the prefix). This toggle only controls the no-summary fallback: when on, the full preceding text is sent even without summaries; when off, the normal prefix window is used.")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.novelMode)

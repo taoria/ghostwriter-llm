@@ -16,8 +16,6 @@ export interface CompletionParams {
   title: string;
   /** Short user requirement for this continuation (from the instruction hotkey). Injected at {extra}. */
   instruction?: string;
-  /** Novel mode: in-note plot summaries; appended at the very end of the prompt regardless of template/cursor position. */
-  novelContext?: string;
 }
 
 export interface CacheUsage {
@@ -107,25 +105,7 @@ export function buildMessages(p: CompletionParams, settings: GhostwriterSettings
     }
   }
 
-  const merged = mergeAdjacent(messages);
-
-  // Novel mode (feature 5): the in-note summary block is always appended at the very
-  // end of the prompt, no matter where the cursor is or how the template is arranged.
-  const novel = p.novelContext?.trim();
-  if (novel) {
-    const block = `[Novel context · 前文情节摘要（按正文顺序，位于光标之前）]\n${novel}`;
-    const last = merged[merged.length - 1];
-    if (last && last.role === "assistant") {
-      // Do not corrupt an assistant prefill; insert before it instead.
-      merged.splice(merged.length - 1, 0, { role: "user", content: block });
-    } else if (last) {
-      last.content += `\n\n${block}`;
-    } else {
-      merged.push({ role: "user", content: block });
-    }
-  }
-
-  return merged;
+  return mergeAdjacent(messages);
 }
 
 function mergeAdjacent(messages: ChatMessage[]): ChatMessage[] {

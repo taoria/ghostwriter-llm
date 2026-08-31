@@ -421,7 +421,6 @@ export default class GhostwriterPlugin extends Plugin {
       summary,
       title,
       instruction,
-      novelContext: ctx.novelContext,
     };
 
     this.currentParams = params;
@@ -511,13 +510,13 @@ export default class GhostwriterPlugin extends Plugin {
 
   /**
    * Build the cursor context. Whenever the full text before the cursor contains
-   * in-note summary blocks (`> [Summary] …`), the summarized text is not sent raw:
-   * the summaries plus the unsummarized tail after the last one are sent instead
-   * (tail → {prefix}, summaries → novelContext, appended at the end of the prompt).
-   * With no summaries present: Novel mode sends the full preceding text; otherwise
-   * the legacy prefix/suffix window is used.
+   * in-note summary blocks (`[Summary]` / `[摘要]` markers anywhere in a line), the
+   * summarized text is not sent raw: the summaries are injected immediately before
+   * the unsummarized tail (both inside {prefix}, summaries first). With no summaries
+   * present: Novel mode sends the full preceding text; otherwise the legacy
+   * prefix/suffix window is used.
    */
-  private buildContext(editor: Editor): { prefix: string; suffix: string; novelContext: string } {
+  private buildContext(editor: Editor): { prefix: string; suffix: string } {
     const cursor = editor.getCursor("head");
     const lastLineNum = editor.lastLine();
     const docEnd = { line: lastLineNum, ch: editor.getLine(lastLineNum).length };
@@ -527,22 +526,23 @@ export default class GhostwriterPlugin extends Plugin {
     const parsed = parseInNoteSummaries(fullPrefix);
 
     if (parsed.hasAny) {
-      // In-note summaries detected (automatic, independent of the Novel mode toggle).
+      // In-note summaries detected (automatic): summaries first, then the tail.
       const cap = Math.max(0, this.settings.prefixChars);
       let tail = parsed.tail.replace(/^[\s\r\n]+/, "").replace(/[\s\r\n]+$/, "");
       if (cap > 0 && tail.length > cap) tail = tail.slice(tail.length - cap);
-      const novelContext = parsed.summaries.map((s, idx) => `[Summary ${idx + 1}] ${s}`).join("\n");
-      return { prefix: tail, suffix, novelContext };
+      const block = parsed.summaries.map((s, idx) => `[Summary ${idx + 1}] ${s}`).join("\n");
+      const prefix = tail ? `${block}\n\n${tail}` : block;
+      return { prefix, suffix };
     }
 
     if (this.settings.novelMode) {
       // Novel mode with no summaries: send the full preceding text.
-      return { prefix: fullPrefix, suffix, novelContext: "" };
+      return { prefix: fullPrefix, suffix };
     }
 
     const windowChars = this.contextWindowChars();
     const { prefix } = getPrefixSuffix(editor, windowChars.prefix, windowChars.suffix);
-    return { prefix, suffix, novelContext: "" };
+    return { prefix, suffix };
   }
 
   /** Cursor context window; level 3 recalls the full note instead of the truncated window. */
@@ -986,7 +986,6 @@ export default class GhostwriterPlugin extends Plugin {
     const ctx = this.buildContext(editor);
     params.prefix = ctx.prefix;
     params.suffix = ctx.suffix;
-    params.novelContext = ctx.novelContext;
     params.title = this.getActiveNoteTitle();
     if (this.settings.previewMode) {
       this.runPreviewCompletion(params, view, cursorPos, ac);

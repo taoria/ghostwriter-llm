@@ -31,8 +31,12 @@ export function ensureTrailingNewline(s: string): string {
   return s.endsWith("\n") ? s : s + "\n";
 }
 
-/** Matches an in-note summary line: `> [Summary] …` or `> [摘要] …` (case-insensitive). */
-export const IN_NOTE_SUMMARY_LINE_RE = /^>\s*\[(?:Summary|摘要)\]\s*(.*)$/i;
+/**
+ * Matches an in-note summary marker anywhere in a line: `> [Summary] …`,
+ * `text > [Summary] …`, `[Summary] …`, `【摘要】…` etc. (case-insensitive).
+ * Group 1 = any text before the marker on the same line, group 2 = summary text.
+ */
+export const IN_NOTE_SUMMARY_LINE_RE = /^(.*?)>?\s*(?:\[(?:Summary|摘要)\]|【(?:Summary|摘要)】)\s*(.*)$/i;
 
 export interface InNoteParseResult {
   /** Summary texts in document order (quote markers stripped, joined to one line each). */
@@ -44,8 +48,9 @@ export interface InNoteParseResult {
 
 /**
  * Split a text into its in-note summary blocks and the raw remainder.
- * A summary block is a blockquote whose first line matches
- * `> [Summary]` / `> [摘要]`; consecutive quote lines continue the block.
+ * A summary block starts at a `[Summary]` / `[摘要]` marker (start of line,
+ * after a quote `>`, or inline after text); consecutive quote lines continue
+ * the block. Text on the same line before the marker counts as covered text.
  */
 export function parseInNoteSummaries(text: string): InNoteParseResult {
   const lines = text.split("\n");
@@ -56,10 +61,16 @@ export function parseInNoteSummaries(text: string): InNoteParseResult {
     const m = lines[i].match(IN_NOTE_SUMMARY_LINE_RE);
     if (m) {
       const parts: string[] = [];
-      const first = m[1].trim();
+      const first = m[2].trim();
       if (first) parts.push(first);
       i++;
-      while (i < lines.length && /^>\s?/.test(lines[i])) {
+      // Consume consecutive quote lines into the same summary block,
+      // but stop when the line starts its own summary marker.
+      while (
+        i < lines.length &&
+        /^>\s?/.test(lines[i]) &&
+        !IN_NOTE_SUMMARY_LINE_RE.test(lines[i])
+      ) {
         const cont = lines[i].replace(/^>\s?/, "").trim();
         if (cont) parts.push(cont);
         i++;
