@@ -54,10 +54,7 @@ export function fillTemplate(
 
 export function buildMessages(p: CompletionParams, settings: GhostwriterSettings): ChatMessage[] {
   const summary = p.summary?.trim() ?? "";
-  const extraParts = [settings.extraPrompt?.trim() ?? ""];
-  const instruction = p.instruction?.trim() ?? "";
-  if (instruction) extraParts.push(`[User instruction]\n${instruction}`);
-  const extra = extraParts.filter(Boolean).join("\n");
+  const extra = settings.extraPrompt?.trim() ?? "";
   const title = p.title?.trim() ?? "";
   const tpl = settings.promptTemplate && settings.promptTemplate.trim()
     ? settings.promptTemplate
@@ -105,7 +102,26 @@ export function buildMessages(p: CompletionParams, settings: GhostwriterSettings
     }
   }
 
-  return mergeAdjacent(messages);
+  const merged = mergeAdjacent(messages);
+
+  // "Continue with an instruction": the short user requirement is appended at the
+  // very end of the prompt so it sits closest to the completion point, regardless
+  // of where the template places {extra}.
+  const instruction = p.instruction?.trim();
+  if (instruction) {
+    const block = `[User instruction · 用户指令]\n${instruction}`;
+    const last = merged[merged.length - 1];
+    if (last && last.role === "assistant") {
+      // Do not corrupt an assistant prefill; insert before it instead.
+      merged.splice(merged.length - 1, 0, { role: "user", content: block });
+    } else if (last) {
+      last.content += `\n\n${block}`;
+    } else {
+      merged.push({ role: "user", content: block });
+    }
+  }
+
+  return merged;
 }
 
 function mergeAdjacent(messages: ChatMessage[]): ChatMessage[] {
