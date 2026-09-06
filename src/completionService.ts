@@ -4,6 +4,7 @@ import * as nodeHttp from "http";
 import {
   GhostwriterSettings,
   MessageRole,
+  activeProvider,
   DEFAULT_PROMPT_TEMPLATE,
   DEFAULT_COT_TEMPLATE,
   DEFAULT_COT_TRIGGER,
@@ -464,7 +465,8 @@ export class CompletionService {
     const h: Record<string, string> = {
       "Content-Type": "application/json",
     };
-    if (s.apiKey) h["Authorization"] = `Bearer ${s.apiKey}`;
+    const key = activeProvider(s).apiKey;
+    if (key) h["Authorization"] = `Bearer ${key}`;
     return h;
   }
 
@@ -482,7 +484,7 @@ export class CompletionService {
   } {
     const s = this.settings();
     return {
-      model: s.model,
+      model: activeProvider(s).model,
       messages: buildMessages(params, s),
       max_tokens: s.maxTokens,
       temperature: s.temperature,
@@ -497,7 +499,12 @@ export class CompletionService {
     signal: AbortSignal
   ): Promise<void> {
     const s = this.settings();
-    const url = joinUrl(s.apiBaseUrl, "chat/completions");
+    const provider = activeProvider(s);
+    if (!provider.apiBaseUrl.trim()) {
+      cb.onError(new Error("No API Base URL configured (Settings → Providers)"));
+      return;
+    }
+    const url = joinUrl(provider.apiBaseUrl, "chat/completions");
     const payload = this.body(params, s.stream);
     const timeoutSec = Math.max(5, Math.floor(Number(s.requestTimeoutSec ?? 120) || 120));
 
@@ -553,7 +560,7 @@ export class CompletionService {
     }
     console.error(
       "[ghostwriter] completion failed",
-      { url, model: s.model, stream: s.stream, messagesChars, error: err }
+      { url, model: activeProvider(s).model, stream: s.stream, messagesChars, error: err }
     );
   }
 

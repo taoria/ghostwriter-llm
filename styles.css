@@ -95,6 +95,33 @@
   font-size: var(--font-ui-small);
 }
 
+/* Settings page: collapsed Advanced section */
+details.ghostwriter-settings-advanced {
+  margin-top: 1.8em;
+  padding-top: 0.7em;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+details.ghostwriter-settings-advanced > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+details.ghostwriter-settings-advanced > summary:hover {
+  color: var(--text-normal);
+}
+
+details.ghostwriter-settings-advanced[open] > summary {
+  color: var(--text-normal);
+  margin-bottom: 0.4em;
+}
+
+details.ghostwriter-settings-advanced > .setting-item-description {
+  margin: 0.35em 0 0.8em;
+}
+
 /* Peek CoT — thinking preview in the inline popup */
 .ghostwriter-popup-thinking {
   display: flex;

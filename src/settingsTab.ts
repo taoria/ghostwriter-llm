@@ -1,13 +1,12 @@
 import { App, Notice, PluginSettingTab, Setting, TextComponent, DropdownComponent } from "obsidian";
 import type GhostwriterPlugin from "./main";
-import { ProviderProfile } from "./settings";
+import { ProviderProfile, activeProvider } from "./settings";
 import { fetchModels } from "./completionService";
 import { SummaryEntry } from "./summaryService";
 import {
   DEFAULT_SYSTEM_PROMPT,
   DEFAULT_PROMPT_TEMPLATE,
   DEFAULT_COT_TEMPLATE,
-  DEFAULT_COT_TRIGGER,
   DEFAULT_NOVEL_SUMMARY_PROMPT,
   defaultPromptsFor,
   PromptLanguage,
@@ -47,62 +46,12 @@ export class GhostwriterSettingTab extends PluginSettingTab {
       heading.createEl("p", { text: description });
     };
 
-    // --- Prompt management: restore / export / import ---
-    section("Prompt management", "Restore, export, or import the instructions used by the completion model.");
-    const promptLangRef: { value: PromptLanguage } = { value: "en" };
-
-    new Setting(containerEl)
-      .setName("Restore default prompts")
-      .setDesc("Reset System prompt, CoT template, CoT trigger, Prompt template and Extra prompt to the built-in defaults for the chosen language. Other settings are not touched.")
-      .addDropdown((dd) => {
-        dd.addOptions({ en: "English", zh: "中文 (Chinese)" });
-        dd.setValue("en");
-        dd.onChange((value) => {
-          promptLangRef.value = value as PromptLanguage;
-        });
-      })
-      .addButton((btn) => {
-        btn.setButtonText("Restore")
-          .setClass("mod-warning")
-          .setTooltip("Replace all prompt-related fields with defaults")
-          .onClick(async () => {
-            const bundle = defaultPromptsFor(promptLangRef.value);
-            for (const k of PROMPT_KEYS) {
-              (this.plugin.settings as unknown as Record<string, unknown>)[k as string] = bundle[k];
-            }
-            await this.plugin.saveSettings();
-            this.display();
-            new Notice(`Prompts restored (${promptLangRef.value === "zh" ? "中文" : "English"})`);
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Export prompts")
-      .setDesc("Download the current prompt bundle (system prompt, prompt template, CoT template, CoT trigger, roles, extra prompt) as a JSON file you can share or back up.")
-      .addButton((btn) => {
-        btn.setButtonText("Export")
-          .setTooltip("Save prompts to a .json file")
-          .onClick(() => this.exportPrompts());
-      });
-
-    new Setting(containerEl)
-      .setName("Import prompts")
-      .setDesc("Load prompts from an exported JSON file. Replaces all prompt-related fields; other settings are not touched.")
-      .addButton((btn) => {
-        btn.setButtonText("Import")
-          .setTooltip("Load prompts from a .json file")
-          .onClick(() => this.importPrompts());
-      });
-
-    // --- end prompt management ---
-
     const s = () => this.plugin.settings;
     const activeProfile = (): ProviderProfile | undefined =>
       s().providers.find((p) => p.id === s().activeProviderId);
 
     const syncActive = async (patch: Partial<ProviderProfile>): Promise<void> => {
       const st = s();
-      Object.assign(st, patch);
       const p = st.providers.find((x) => x.id === st.activeProviderId);
       if (p) Object.assign(p, patch);
       await this.plugin.saveSettings();
@@ -131,14 +80,14 @@ export class GhostwriterSettingTab extends PluginSettingTab {
             .onClick(async () => {
               const st = s();
               const idx = st.providers.findIndex((p) => p.id === st.activeProviderId);
-              if (idx >= 0) st.providers.splice(idx, 1);
+              const removed = idx >= 0 ? st.providers.splice(idx, 1)[0] : undefined;
               if (!st.providers.length) {
                 st.providers.push({
                   id: "default",
                   name: "Default",
-                  apiBaseUrl: st.apiBaseUrl,
-                  apiKey: st.apiKey,
-                  model: st.model,
+                  apiBaseUrl: removed?.apiBaseUrl ?? "https://api.openai.com/v1",
+                  apiKey: removed?.apiKey ?? "",
+                  model: removed?.model ?? "gpt-4o-mini",
                 });
                 new Notice("Last profile deleted; recreated a Default profile");
               } else {
@@ -165,12 +114,13 @@ export class GhostwriterSettingTab extends PluginSettingTab {
           const st = s();
           const name = newName.value.trim() || `Provider ${st.providers.length + 1}`;
           const id = `p-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+          const cur = activeProvider(st);
           st.providers.push({
             id,
             name,
-            apiBaseUrl: st.apiBaseUrl,
-            apiKey: st.apiKey,
-            model: st.model,
+            apiBaseUrl: cur.apiBaseUrl,
+            apiKey: cur.apiKey,
+            model: cur.model,
           });
           await this.plugin.switchProvider(id);
           this.display();
@@ -227,37 +177,7 @@ export class GhostwriterSettingTab extends PluginSettingTab {
       );
     }
 
-    section("Generation limits", "Request limits shared by every provider.");
-
-    new Setting(containerEl)
-      .setName("Request timeout (sec)")
-      .setDesc("Abort the request and show an error if the provider does not finish within this time. Prevents an endless Generating state.")
-      .addText((text) =>
-        text
-          .setValue(String(this.plugin.settings.requestTimeoutSec))
-          .onChange(async (value) => {
-            const n = Number(value);
-            if (Number.isFinite(n) && n >= 5) {
-              this.plugin.settings.requestTimeoutSec = Math.floor(n);
-              await this.plugin.saveSettings();
-            }
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Max tokens")
-      .setDesc("Hard API-side token cap. With CoT enabled the model also outputs its thinking, so keep this high (default 8192). Set above max_words * ~3 as a safety net.")
-      .addText((text) =>
-        text
-          .setValue(String(this.plugin.settings.maxTokens))
-          .onChange(async (value) => {
-            const n = Number(value);
-            if (Number.isFinite(n) && n > 0) {
-              this.plugin.settings.maxTokens = Math.floor(n);
-              await this.plugin.saveSettings();
-            }
-          })
-      );
+    section("Generation limits", "Soft limits shared by every provider. The request timeout and the hard token cap are in Advanced below.");
 
     new Setting(containerEl)
       .setName("Max words")
@@ -315,14 +235,6 @@ export class GhostwriterSettingTab extends PluginSettingTab {
             this.plugin.settings.promptTemplate = value;
             await this.plugin.saveSettings();
           });
-      })
-      .addDropdown((dd) => {
-        dd.addOptions({ user: "User", assistant: "Agent (assistant)", system: "System" });
-        dd.setValue(this.plugin.settings.promptTemplateRole);
-        dd.onChange(async (value) => {
-          this.plugin.settings.promptTemplateRole = value as typeof this.plugin.settings.promptTemplateRole;
-          await this.plugin.saveSettings();
-        });
       });
 
     new Setting(containerEl)
@@ -435,36 +347,7 @@ export class GhostwriterSettingTab extends PluginSettingTab {
           })
       );
 
-    new Setting(containerEl)
-      .setName("Adjacent total chars")
-      .setDesc("Overall character budget for all adjacent note blocks combined (recall level 2/3). Keeps the prompt within the model's context window.")
-      .addText((text) =>
-        text
-          .setValue(String(this.plugin.settings.adjacentTotalChars))
-          .onChange(async (value) => {
-            const n = Number(value);
-            if (Number.isFinite(n) && n >= 200) {
-              this.plugin.settings.adjacentTotalChars = Math.floor(n);
-              await this.plugin.saveSettings();
-            }
-          })
-      );
-
     section("Summary recall", "Inject manually generated summaries from the configured summary folder into completion context.");
-    new Setting(containerEl)
-      .setName("Manual fallback summary")
-      .setDesc("Optional extra text appended to the injected summary context as a [Manual summary] block. Recalled alongside generated summary files. Leave empty to skip.")
-      .addTextArea((text) => {
-        text.inputEl.rows = 4;
-        text.inputEl.cols = 60;
-        text
-          .setValue(this.plugin.settings.summary)
-          .onChange(async (value) => {
-            this.plugin.settings.summary = value;
-            await this.plugin.saveSettings();
-          });
-      });
-
     new Setting(containerEl)
       .setName("Summary recall")
       .setDesc("Master switch. When on, the plugin scans the configured summary subfolder for `summary-{number}.md` files and injects them as the {summary} context (current note first, then others alphabetically). When off, no summaries are injected. A session toggle (status bar / command) ANDs with this.")
@@ -508,19 +391,26 @@ export class GhostwriterSettingTab extends PluginSettingTab {
         new Setting(fileListContainer)
           .setName(`${fileName} → ${e.title}`)
           .setDesc(`Source: ${e.path}`)
-          .addToggle((toggle) =>
+          .addToggle((toggle) => {
+            const keyDisabled = (key: string): boolean =>
+              (this.plugin.settings.disabledSummaryFiles ?? []).includes(key);
             toggle
               .setTooltip("Inject this summary file during recall")
-              .setValue(!(this.plugin.settings.disabledSummaryFiles ?? []).includes(e.summaryFilePath))
+              .setValue(!keyDisabled(e.summaryFilePath) && !keyDisabled(e.path))
               .onChange(async (value) => {
                 const st = this.plugin.settings;
                 const list = new Set(st.disabledSummaryFiles ?? []);
-                if (value) list.delete(e.summaryFilePath);
-                else list.add(e.summaryFilePath);
+                if (value) {
+                  list.delete(e.summaryFilePath);
+                  list.delete(e.path);
+                } else {
+                  list.add(e.summaryFilePath);
+                  list.add(e.path);
+                }
                 st.disabledSummaryFiles = [...list];
                 await this.plugin.saveSettings();
-              })
-          );
+              });
+          });
       }
     })();
 
@@ -552,21 +442,6 @@ export class GhostwriterSettingTab extends PluginSettingTab {
     );
 
     new Setting(containerEl)
-      .setName("Summary max tokens")
-      .setDesc("API-side token cap for a single summary generation. Reasoning models spend tokens on hidden thinking before writing the summary — keep this generous (default 4096). If it is exhausted the plugin auto-retries with a larger budget.")
-      .addText((text) =>
-        text
-          .setValue(String(this.plugin.settings.summaryMaxTokens))
-          .onChange(async (value) => {
-            const n = Number(value);
-            if (Number.isFinite(n) && n > 0) {
-              this.plugin.settings.summaryMaxTokens = Math.floor(n);
-              await this.plugin.saveSettings();
-            }
-          })
-      );
-
-    new Setting(containerEl)
       .setName("Summary max words")
       .setDesc("Soft word/char limit injected as the {max_words} instruction to the summary model.")
       .addText((text) =>
@@ -576,50 +451,6 @@ export class GhostwriterSettingTab extends PluginSettingTab {
             const n = Number(value);
             if (Number.isFinite(n) && n > 0) {
               this.plugin.settings.summaryMaxWords = Math.floor(n);
-              await this.plugin.saveSettings();
-            }
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Summary temperature")
-      .addText((text) =>
-        text
-          .setValue(String(this.plugin.settings.summaryTemperature))
-          .onChange(async (value) => {
-            const n = Number(value);
-            if (Number.isFinite(n) && n >= 0 && n <= 2) {
-              this.plugin.settings.summaryTemperature = n;
-              await this.plugin.saveSettings();
-            }
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Summary input chars")
-      .setDesc("Maximum characters of the note body sent to the summary model. Larger notes are truncated from the start.")
-      .addText((text) =>
-        text
-          .setValue(String(this.plugin.settings.summaryInputChars))
-          .onChange(async (value) => {
-            const n = Number(value);
-            if (Number.isFinite(n) && n > 0) {
-              this.plugin.settings.summaryInputChars = Math.floor(n);
-              await this.plugin.saveSettings();
-            }
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Summary scan limit")
-      .setDesc("Max number of generated summary files scanned per completion. Lower this for very large vaults.")
-      .addText((text) =>
-        text
-          .setValue(String(this.plugin.settings.summaryScanLimit))
-          .onChange(async (value) => {
-            const n = Number(value);
-            if (Number.isFinite(n) && n > 0) {
-              this.plugin.settings.summaryScanLimit = Math.floor(n);
               await this.plugin.saveSettings();
             }
           })
@@ -650,34 +481,6 @@ export class GhostwriterSettingTab extends PluginSettingTab {
             this.plugin.settings.cotTemplate = value;
             await this.plugin.saveSettings();
           });
-      })
-      .addDropdown((dd) => {
-        dd.addOptions({ user: "User", assistant: "Agent (assistant)", system: "System" });
-        dd.setValue(this.plugin.settings.cotTemplateRole);
-        dd.onChange(async (value) => {
-          this.plugin.settings.cotTemplateRole = value as typeof this.plugin.settings.cotTemplateRole;
-          await this.plugin.saveSettings();
-        });
-      });
-
-    new Setting(containerEl)
-      .setName("CoT trigger")
-      .setDesc("Appended at the END as the final message to nudge the model into thinking. Default role is Agent (assistant) so it acts as an assistant prefill, which reliably triggers thinking on models that otherwise skip it.")
-      .addText((text) =>
-        text
-          .setValue(this.plugin.settings.cotTrigger || DEFAULT_COT_TRIGGER)
-          .onChange(async (value) => {
-            this.plugin.settings.cotTrigger = value;
-            await this.plugin.saveSettings();
-          })
-      )
-      .addDropdown((dd) => {
-        dd.addOptions({ assistant: "Agent (assistant)", user: "User", system: "System" });
-        dd.setValue(this.plugin.settings.cotTriggerRole);
-        dd.onChange(async (value) => {
-          this.plugin.settings.cotTriggerRole = value as typeof this.plugin.settings.cotTriggerRole;
-          await this.plugin.saveSettings();
-        });
       });
 
     section("Novel mode", "Paragraph-level in-note summaries for fiction writing.");
@@ -769,13 +572,183 @@ export class GhostwriterSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+
+    // --- Advanced: collapsed low-frequency options ---
+    const advanced = containerEl.createEl("details", { cls: "ghostwriter-settings-advanced" });
+    advanced.createEl("summary", { text: "Advanced" });
+    advanced.createEl("p", {
+      text: "Low-frequency options; the defaults are fine for most setups.",
+      cls: "setting-item-description",
+    });
+    const adv = advanced.createDiv();
+
+    const promptLangRef: { value: PromptLanguage } = { value: "en" };
+    new Setting(adv)
+      .setName("Restore default prompts")
+      .setDesc("Reset System prompt, CoT template, Prompt template and Extra prompt to the built-in defaults for the chosen language. Other settings are not touched.")
+      .addDropdown((dd) => {
+        dd.addOptions({ en: "English", zh: "中文 (Chinese)" });
+        dd.setValue("en");
+        dd.onChange((value) => {
+          promptLangRef.value = value as PromptLanguage;
+        });
+      })
+      .addButton((btn) => {
+        btn.setButtonText("Restore")
+          .setClass("mod-warning")
+          .setTooltip("Replace all prompt-related fields with defaults")
+          .onClick(async () => {
+            const bundle = defaultPromptsFor(promptLangRef.value);
+            for (const k of PROMPT_KEYS) {
+              (this.plugin.settings as unknown as Record<string, unknown>)[k as string] = bundle[k];
+            }
+            await this.plugin.saveSettings();
+            this.display();
+            new Notice(`Prompts restored (${promptLangRef.value === "zh" ? "中文" : "English"})`);
+          });
+      });
+
+    new Setting(adv)
+      .setName("Export prompts")
+      .setDesc("Download the current prompt bundle (system prompt, prompt template, CoT template, CoT trigger, roles, extra prompt) as a .json file you can share or back up. The only way to edit the hidden CoT trigger and message roles.")
+      .addButton((btn) => {
+        btn.setButtonText("Export")
+          .setTooltip("Save prompts to a .json file")
+          .onClick(() => this.exportPrompts());
+      });
+
+    new Setting(adv)
+      .setName("Import prompts")
+      .setDesc("Load prompts from an exported JSON file. Replaces all prompt-related fields; other settings are not touched.")
+      .addButton((btn) => {
+        btn.setButtonText("Import")
+          .setTooltip("Load prompts from a .json file")
+          .onClick(() => this.importPrompts());
+      });
+
+    new Setting(adv)
+      .setName("Request timeout (sec)")
+      .setDesc("Abort the request and show an error if the provider does not finish within this time. Prevents an endless Generating state.")
+      .addText((text) =>
+        text
+          .setValue(String(this.plugin.settings.requestTimeoutSec))
+          .onChange(async (value) => {
+            const n = Number(value);
+            if (Number.isFinite(n) && n >= 5) {
+              this.plugin.settings.requestTimeoutSec = Math.floor(n);
+              await this.plugin.saveSettings();
+            }
+          })
+      );
+
+    new Setting(adv)
+      .setName("Max tokens")
+      .setDesc("Hard API-side token cap. With CoT enabled the model also outputs its thinking, so keep this high (default 8192). Set above max_words * ~3 as a safety net.")
+      .addText((text) =>
+        text
+          .setValue(String(this.plugin.settings.maxTokens))
+          .onChange(async (value) => {
+            const n = Number(value);
+            if (Number.isFinite(n) && n > 0) {
+              this.plugin.settings.maxTokens = Math.floor(n);
+              await this.plugin.saveSettings();
+            }
+          })
+      );
+
+    new Setting(adv)
+      .setName("Adjacent total chars")
+      .setDesc("Overall character budget for all adjacent note blocks combined (recall level 2/3). Keeps the prompt within the model's context window.")
+      .addText((text) =>
+        text
+          .setValue(String(this.plugin.settings.adjacentTotalChars))
+          .onChange(async (value) => {
+            const n = Number(value);
+            if (Number.isFinite(n) && n >= 200) {
+              this.plugin.settings.adjacentTotalChars = Math.floor(n);
+              await this.plugin.saveSettings();
+            }
+          })
+      );
+
+    new Setting(adv)
+      .setName("Manual fallback summary")
+      .setDesc("Optional extra text appended to the injected summary context as a [Manual summary] block. Recalled alongside generated summary files. Leave empty to skip.")
+      .addTextArea((text) => {
+        text.inputEl.rows = 4;
+        text.inputEl.cols = 60;
+        text
+          .setValue(this.plugin.settings.summary)
+          .onChange(async (value) => {
+            this.plugin.settings.summary = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(adv)
+      .setName("Summary max tokens")
+      .setDesc("API-side token cap for a single summary generation. Reasoning models spend tokens on hidden thinking before writing the summary — keep this generous (default 4096). If it is exhausted the plugin auto-retries with a larger budget.")
+      .addText((text) =>
+        text
+          .setValue(String(this.plugin.settings.summaryMaxTokens))
+          .onChange(async (value) => {
+            const n = Number(value);
+            if (Number.isFinite(n) && n > 0) {
+              this.plugin.settings.summaryMaxTokens = Math.floor(n);
+              await this.plugin.saveSettings();
+            }
+          })
+      );
+
+    new Setting(adv)
+      .setName("Summary temperature")
+      .addText((text) =>
+        text
+          .setValue(String(this.plugin.settings.summaryTemperature))
+          .onChange(async (value) => {
+            const n = Number(value);
+            if (Number.isFinite(n) && n >= 0 && n <= 2) {
+              this.plugin.settings.summaryTemperature = n;
+              await this.plugin.saveSettings();
+            }
+          })
+      );
+
+    new Setting(adv)
+      .setName("Summary input chars")
+      .setDesc("Maximum characters of the note body sent to the summary model. Larger notes are truncated from the start.")
+      .addText((text) =>
+        text
+          .setValue(String(this.plugin.settings.summaryInputChars))
+          .onChange(async (value) => {
+            const n = Number(value);
+            if (Number.isFinite(n) && n > 0) {
+              this.plugin.settings.summaryInputChars = Math.floor(n);
+              await this.plugin.saveSettings();
+            }
+          })
+      );
+
+    new Setting(adv)
+      .setName("Summary scan limit")
+      .setDesc("Max number of generated summary files scanned per completion. Lower this for very large vaults.")
+      .addText((text) =>
+        text
+          .setValue(String(this.plugin.settings.summaryScanLimit))
+          .onChange(async (value) => {
+            const n = Number(value);
+            if (Number.isFinite(n) && n > 0) {
+              this.plugin.settings.summaryScanLimit = Math.floor(n);
+              await this.plugin.saveSettings();
+            }
+          })
+      );
   }
 
-  /** Base URL / API key of the active provider profile (falls back to top-level fields). */
+  /** Base URL / API key of the active provider profile. */
   private activeConnection(): { apiBaseUrl: string; apiKey: string } {
-    const st = this.plugin.settings;
-    const p = st.providers.find((x) => x.id === st.activeProviderId);
-    return { apiBaseUrl: p?.apiBaseUrl ?? st.apiBaseUrl, apiKey: p?.apiKey ?? st.apiKey };
+    const p = activeProvider(this.plugin.settings);
+    return { apiBaseUrl: p.apiBaseUrl, apiKey: p.apiKey };
   }
 
   /** Text field + "Fetch models" button; the fetched-models dropdown is placed right below the row. */

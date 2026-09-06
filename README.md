@@ -49,12 +49,15 @@ The bottom status bar shows `Cache: ...` after each completion, and preview mode
 
 ## Settings Groups
 
-- **Prompt management**: restore, export, and import prompt bundles.
-- **Connection & model**: API endpoint, model, token limit, word limit, and temperature.
-- **Prompt & context**: system prompt, prompt template, and cursor context size.
-- **Summary recall**: summary folder, summary model, and summary generation limits.
-- **Reasoning**: optional chain-of-thought instructions and triggers.
+- **Providers**: multiple OpenAI-compatible profiles (Base URL, API key, model) with model-list fetching; the active profile is the single source of truth for the connection.
+- **Generation limits**: word limit and temperature. The request timeout and the hard token cap live in Advanced.
+- **Prompt & context**: system prompt, prompt template, extra prompt, and cursor context size.
+- **Recall level**: how much context is collected (cursor window, summaries, linked notes).
+- **Summary recall**: master toggle, per-file switches, status panel, summary folder, summary model, and word limit.
+- **Reasoning**: optional chain-of-thought toggle and template. The CoT trigger and message roles remain in data (and in exported prompt bundles) but are no longer shown in the UI.
+- **Novel mode**: in-note paragraph summaries for fiction writing.
 - **Display & shortcuts**: preview mode, streaming, thinking preview, and keyboard shortcuts.
+- **Advanced** (collapsed): prompt restore/export/import, request timeout, max tokens, adjacent total chars, manual fallback summary, and the remaining summary generation limits.
 
 ## Demo
 

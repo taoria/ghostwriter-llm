@@ -9,9 +9,6 @@ export interface ProviderProfile {
 }
 
 export interface GhostwriterSettings {
-  apiBaseUrl: string;
-  apiKey: string;
-  model: string;
   providers: ProviderProfile[];
   activeProviderId: string;
   maxTokens: number;
@@ -25,7 +22,6 @@ export interface GhostwriterSettings {
   suffixChars: number;
   summary: string;
   summaryEnabled: boolean;
-  summaryDisabledPaths: string[];
   summaryFolder: string;
   summaryModel: string;
   summaryMaxTokens: number;
@@ -33,6 +29,7 @@ export interface GhostwriterSettings {
   summaryTemperature: number;
   summaryInputChars: number;
   summaryScanLimit: number;
+  /** Disabled summary keys: entries may be a source-note path or a summary-file path; both are checked at injection time. */
   disabledSummaryFiles: string[];
   recallLevel: number;
   adjacentDepth: number;
@@ -173,9 +170,6 @@ export const PROMPT_BUNDLE_VERSION = 1;
 export const PROMPT_BUNDLE_MAGIC = "ghostwriter-llm-prompts";
 
 export const DEFAULT_SETTINGS: GhostwriterSettings = {
-  apiBaseUrl: "https://api.openai.com/v1",
-  apiKey: "",
-  model: "gpt-4o-mini",
   providers: [],
   activeProviderId: "",
   maxTokens: 8192,
@@ -189,7 +183,6 @@ export const DEFAULT_SETTINGS: GhostwriterSettings = {
   suffixChars: 1000,
   summary: "",
   summaryEnabled: true,
-  summaryDisabledPaths: [],
   summaryFolder: "summaries",
   summaryModel: "gpt-4o-mini",
   summaryMaxTokens: 4096,
@@ -217,3 +210,64 @@ export const DEFAULT_SETTINGS: GhostwriterSettings = {
   acceptKey: "Shift+Insert",
   dismissKey: "Escape",
 };
+
+/** The profile requests are issued against: the active id wins, the first profile is the fallback. */
+export function activeProvider(s: GhostwriterSettings): ProviderProfile {
+  const p = s.providers.find((x) => x.id === s.activeProviderId) ?? s.providers[0];
+  if (p) return p;
+  throw new Error("No provider profile configured (Settings → Providers)");
+}
+
+const LEGACY_CONNECTION_DEFAULTS = {
+  apiBaseUrl: "https://api.openai.com/v1",
+  apiKey: "",
+  model: "gpt-4o-mini",
+};
+
+const LEGACY_SETTING_KEYS = ["apiBaseUrl", "apiKey", "model", "summaryDisabledPaths"];
+
+const asStrings = (arr: unknown): string[] =>
+  Array.isArray(arr) ? arr.filter((p): p is string => typeof p === "string") : [];
+
+/**
+ * Build the current settings shape from persisted data, migrating legacy fields:
+ * top-level connection fields fold into a "Default" provider profile when no
+ * providers exist, summaryDisabledPaths merges into disabledSummaryFiles, and
+ * all legacy keys are dropped so they leave data.json.
+ */
+export function migrateSettings(raw: unknown): GhostwriterSettings {
+  const data = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const s = Object.assign({}, DEFAULT_SETTINGS, data) as GhostwriterSettings & Record<string, unknown>;
+
+  // Clone so the shared DEFAULT_SETTINGS arrays are never mutated.
+  s.providers = Array.isArray(s.providers) ? s.providers.map((p) => ({ ...p })) : [];
+  if (s.providers.length === 0) {
+    const legacyBase = typeof data.apiBaseUrl === "string" ? data.apiBaseUrl.trim() : "";
+    const legacyModel = typeof data.model === "string" ? data.model.trim() : "";
+    s.providers.push({
+      id: "default",
+      name: "Default",
+      apiBaseUrl: legacyBase || LEGACY_CONNECTION_DEFAULTS.apiBaseUrl,
+      apiKey: typeof data.apiKey === "string" ? data.apiKey : "",
+      model: legacyModel || LEGACY_CONNECTION_DEFAULTS.model,
+    });
+  }
+  const active = s.providers.find((p) => p.id === s.activeProviderId) ?? s.providers[0];
+  s.activeProviderId = active.id;
+
+  s.disabledSummaryFiles = [
+    ...new Set([...asStrings(s.disabledSummaryFiles), ...asStrings(data.summaryDisabledPaths)]),
+  ];
+
+  const lvl = Math.floor(Number(s.recallLevel ?? 1));
+  s.recallLevel = Math.min(3, Math.max(0, Number.isFinite(lvl) ? lvl : 1));
+  s.adjacentDepth = Math.max(1, Math.floor(Number(s.adjacentDepth ?? 1)) || 1);
+  s.adjacentMaxNotes = Math.max(1, Math.floor(Number(s.adjacentMaxNotes ?? 20)) || 20);
+  s.adjacentNoteChars = Math.max(200, Math.floor(Number(s.adjacentNoteChars ?? 1500)) || 1500);
+  s.adjacentTotalChars = Math.max(200, Math.floor(Number(s.adjacentTotalChars ?? 12000)) || 12000);
+  const tSec = Math.floor(Number(s.requestTimeoutSec ?? 120));
+  s.requestTimeoutSec = Math.max(5, Number.isFinite(tSec) ? tSec : 120);
+
+  for (const k of LEGACY_SETTING_KEYS) delete s[k];
+  return s;
+}

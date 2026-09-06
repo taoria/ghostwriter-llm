@@ -1,6 +1,6 @@
 import { Plugin, Notice, Editor, TFile, TFolder, TAbstractFile, Modal, App } from "obsidian";
 import { EditorView } from "@codemirror/view";
-import { DEFAULT_SETTINGS, GhostwriterSettings, ProviderProfile } from "./settings";
+import { GhostwriterSettings, migrateSettings } from "./settings";
 import { GhostwriterSettingTab } from "./settingsTab";
 import { CacheUsage, CompletionService, CompletionParams, formatCacheUsage, fetchModels } from "./completionService";
 import { clearGhostEffect, getGhost, ghostExtension, setGhostEffect, GhostState } from "./ghostText";
@@ -309,45 +309,14 @@ export default class GhostwriterPlugin extends Plugin {
   }
 
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-    if (!Array.isArray(this.settings.providers)) this.settings.providers = [];
-    if (this.settings.providers.length === 0) {
-      this.settings.providers.push({
-        id: "default",
-        name: "Default",
-        apiBaseUrl: this.settings.apiBaseUrl,
-        apiKey: this.settings.apiKey,
-        model: this.settings.model,
-      });
-      this.settings.activeProviderId = "default";
-    }
-    const active =
-      this.settings.providers.find((p) => p.id === this.settings.activeProviderId) ??
-      this.settings.providers[0];
-    this.applyProviderFields(active);
-    if (!Array.isArray(this.settings.disabledSummaryFiles)) this.settings.disabledSummaryFiles = [];
-    const lvl = Math.floor(Number(this.settings.recallLevel ?? 1));
-    this.settings.recallLevel = Math.min(3, Math.max(0, Number.isFinite(lvl) ? lvl : 1));
-    this.settings.adjacentDepth = Math.max(1, Math.floor(Number(this.settings.adjacentDepth ?? 1)) || 1);
-    this.settings.adjacentMaxNotes = Math.max(1, Math.floor(Number(this.settings.adjacentMaxNotes ?? 20)) || 20);
-    this.settings.adjacentNoteChars = Math.max(200, Math.floor(Number(this.settings.adjacentNoteChars ?? 1500)) || 1500);
-    this.settings.adjacentTotalChars = Math.max(200, Math.floor(Number(this.settings.adjacentTotalChars ?? 12000)) || 12000);
-    const tSec = Math.floor(Number(this.settings.requestTimeoutSec ?? 120));
-    this.settings.requestTimeoutSec = Math.max(5, Number.isFinite(tSec) ? tSec : 120);
+    this.settings = migrateSettings(await this.loadData());
     await this.saveSettings();
-  }
-
-  private applyProviderFields(p: ProviderProfile) {
-    this.settings.activeProviderId = p.id;
-    this.settings.apiBaseUrl = p.apiBaseUrl;
-    this.settings.apiKey = p.apiKey;
-    this.settings.model = p.model;
   }
 
   async switchProvider(id: string): Promise<void> {
     const p = this.settings.providers.find((x) => x.id === id);
     if (!p) return;
-    this.applyProviderFields(p);
+    this.settings.activeProviderId = p.id;
     await this.saveSettings();
   }
 
@@ -453,8 +422,8 @@ export default class GhostwriterPlugin extends Plugin {
           if (
             activeSummary &&
             activeSummary.summaryFilePath !== file.path &&
-            this.isSummaryEnabled(activeSummary.path) &&
-            !this.isFileDisabled(activeSummary.summaryFilePath)
+            !this.summaryKeyDisabled(activeSummary.path) &&
+            !this.summaryKeyDisabled(activeSummary.summaryFilePath)
           ) {
             parts.push(`[Summary: ${activeSummary.title}]\n${activeSummary.summary}`);
           }
@@ -477,7 +446,7 @@ export default class GhostwriterPlugin extends Plugin {
       others.sort((a, b) => a.title.localeCompare(b.title));
       for (const e of others) {
         if (signal.aborted) return "";
-        if (this.isSummaryEnabled(e.path) && !this.isFileDisabled(e.summaryFilePath)) {
+        if (!this.summaryKeyDisabled(e.path) && !this.summaryKeyDisabled(e.summaryFilePath)) {
           parts.push(`[Summary: ${e.title}]\n${e.summary}`);
         }
       }
@@ -553,8 +522,9 @@ export default class GhostwriterPlugin extends Plugin {
     return { prefix: this.settings.prefixChars, suffix: this.settings.suffixChars };
   }
 
-  private isFileDisabled(summaryFilePath: string): boolean {
-    return (this.settings.disabledSummaryFiles ?? []).includes(summaryFilePath);
+  /** A summary is skipped when either its source-note path or its summary-file path is in the disable list. */
+  private summaryKeyDisabled(key: string): boolean {
+    return (this.settings.disabledSummaryFiles ?? []).includes(key);
   }
 
   /**
@@ -637,11 +607,6 @@ export default class GhostwriterPlugin extends Plugin {
         const changed = next.some((p, i) => p !== arr[i]);
         return [next, changed] as [string[], boolean];
       };
-      const [dp, dChanged] = apply(s.summaryDisabledPaths);
-      if (dChanged) {
-        s.summaryDisabledPaths = dp;
-        touched = true;
-      }
       const [fp, fChanged] = apply(s.disabledSummaryFiles);
       if (fChanged) {
         s.disabledSummaryFiles = fp;
@@ -669,7 +634,7 @@ export default class GhostwriterPlugin extends Plugin {
   }
 
   private isSummaryEnabled(sourcePath: string): boolean {
-    return !(this.settings.summaryDisabledPaths ?? []).includes(sourcePath);
+    return !this.summaryKeyDisabled(sourcePath);
   }
 
   private async toggleCurrentSummary(): Promise<void> {
@@ -679,11 +644,19 @@ export default class GhostwriterPlugin extends Plugin {
       return;
     }
 
-    const disabledPaths = this.settings.summaryDisabledPaths ?? [];
-    const disabled = disabledPaths.includes(file.path);
-    this.settings.summaryDisabledPaths = disabled
-      ? disabledPaths.filter((path) => path !== file.path)
-      : [...disabledPaths, file.path];
+    let summaryFilePath: string | null = null;
+    try {
+      summaryFilePath = (await this.summaryService.findForFile(file))?.summaryFilePath ?? null;
+    } catch {
+      // No summary file yet; the source-path key still controls future summaries.
+    }
+    const keys = [file.path];
+    if (summaryFilePath && summaryFilePath !== file.path) keys.push(summaryFilePath);
+    const list = this.settings.disabledSummaryFiles ?? [];
+    const disabled = keys.some((k) => list.includes(k));
+    this.settings.disabledSummaryFiles = disabled
+      ? list.filter((p) => !keys.includes(p))
+      : [...list, ...keys.filter((k) => !list.includes(k))];
     await this.saveSettings();
     this.updateStatusBar();
     new Notice(`Current note summary ${disabled ? "ON" : "OFF"}`);

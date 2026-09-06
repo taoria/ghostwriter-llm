@@ -130,9 +130,9 @@ export class SummaryStatusModal extends Modal {
       });
       head.createSpan({ text: row.name, cls: "gw-sum-file-name" });
       if (row.ok) {
+        const disabledKeys = this.plugin.settings.disabledSummaryFiles ?? [];
         const off =
-          (this.plugin.settings.disabledSummaryFiles ?? []).includes(row.path) ||
-          (row.source && (this.plugin.settings.summaryDisabledPaths ?? []).includes(row.source));
+          disabledKeys.includes(row.path) || (!!row.source && disabledKeys.includes(row.source));
         if (off) head.createSpan({ text: "OFF", cls: "gw-sum-badge is-off" });
       } else {
         head.createSpan({ text: "NOT INJECTED", cls: "gw-sum-badge is-failed" });

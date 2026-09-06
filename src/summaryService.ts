@@ -1,5 +1,5 @@
 import { App, Notice, TFile, TFolder, Vault, requestUrl } from "obsidian";
-import { GhostwriterSettings, DEFAULT_SUMMARY_SYSTEM_PROMPT } from "./settings";
+import { GhostwriterSettings, activeProvider, DEFAULT_SUMMARY_SYSTEM_PROMPT } from "./settings";
 import { apiError, parseSSEBody } from "./completionService";
 
 export interface SummaryEntry {
@@ -221,14 +221,15 @@ export class SummaryService {
   ): Promise<string> {
     const s = this.settings();
     if (!s.summaryModel) throw new Error("No summary model configured (Settings → Summary recall → Summary model)");
-    if (!s.apiBaseUrl) throw new Error("No API Base URL configured");
-    const url = joinUrl(s.apiBaseUrl, "chat/completions");
+    const provider = activeProvider(s);
+    if (!provider.apiBaseUrl.trim()) throw new Error("No API Base URL configured");
+    const url = joinUrl(provider.apiBaseUrl, "chat/completions");
     const maxWords = opts?.maxWords ?? s.summaryMaxWords;
     const sys = (opts?.systemPrompt ?? DEFAULT_SUMMARY_SYSTEM_PROMPT).replace(/\{max_words\}/g, String(maxWords));
     const noteText = text.slice(0, Math.max(s.summaryInputChars, 100));
     const timeoutSec = Math.max(5, Math.floor(Number(s.requestTimeoutSec ?? 120) || 120));
     const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (s.apiKey) headers["Authorization"] = `Bearer ${s.apiKey}`;
+    if (provider.apiKey) headers["Authorization"] = `Bearer ${provider.apiKey}`;
 
     // Streamed like completions: some providers reject non-streamed requests whose
     // body contains typographic quotes (HTTP 500), and SSE is the reliable path.
