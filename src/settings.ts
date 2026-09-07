@@ -15,6 +15,8 @@ export interface GhostwriterSettings {
   maxWords: number;
   temperature: number;
   requestTimeoutSec: number;
+  /** Extra HTTP headers sent with every provider request, one "Name: Value" per line; overrides the defaults. */
+  customHeaders: string;
   systemPrompt: string;
   promptTemplate: string;
   extraPrompt: string;
@@ -176,6 +178,7 @@ export const DEFAULT_SETTINGS: GhostwriterSettings = {
   maxWords: 100,
   temperature: 0.7,
   requestTimeoutSec: 120,
+  customHeaders: "",
   systemPrompt: DEFAULT_SYSTEM_PROMPT,
   promptTemplate: DEFAULT_PROMPT_TEMPLATE,
   extraPrompt: "",
@@ -216,6 +219,32 @@ export function activeProvider(s: GhostwriterSettings): ProviderProfile {
   const p = s.providers.find((x) => x.id === s.activeProviderId) ?? s.providers[0];
   if (p) return p;
   throw new Error("No provider profile configured (Settings → Providers)");
+}
+
+/**
+ * Parse the custom-headers setting ("Name: Value", one per line) into a header
+ * map. Line order is preserved; malformed lines are reported to the console and
+ * skipped. Comments (# …) are ignored.
+ */
+export function parseCustomHeaders(raw: string): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const line of (raw ?? "").split(/\r?\n/)) {
+    const text = line.trim();
+    if (!text || text.startsWith("#")) continue;
+    const sep = text.indexOf(":");
+    if (sep <= 0) {
+      console.warn(`[ghostwriter] ignoring malformed custom header: ${text}`);
+      continue;
+    }
+    const name = text.slice(0, sep).trim();
+    const value = text.slice(sep + 1).trim();
+    if (!name) {
+      console.warn(`[ghostwriter] ignoring malformed custom header: ${text}`);
+      continue;
+    }
+    headers[name] = value;
+  }
+  return headers;
 }
 
 const LEGACY_CONNECTION_DEFAULTS = {

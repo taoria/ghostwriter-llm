@@ -5,6 +5,7 @@ import {
   GhostwriterSettings,
   MessageRole,
   activeProvider,
+  parseCustomHeaders,
   DEFAULT_PROMPT_TEMPLATE,
   DEFAULT_COT_TEMPLATE,
   DEFAULT_COT_TRIGGER,
@@ -194,10 +195,15 @@ function joinUrl(base: string, path: string): string {
   return `${base}/${path}`;
 }
 
-export async function fetchModels(apiBaseUrl: string, apiKey: string): Promise<string[]> {
+export async function fetchModels(
+  apiBaseUrl: string,
+  apiKey: string,
+  extraHeaders?: Record<string, string>
+): Promise<string[]> {
   const url = joinUrl(apiBaseUrl.trim(), "models");
   const headers: Record<string, string> = {};
   if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+  Object.assign(headers, extraHeaders);
   const resp = await requestUrl({ url, method: "GET", headers, throw: false });
   if (resp.status < 200 || resp.status >= 300) {
     throw new Error(`API ${resp.status}: ${(resp.text || "failed to list models").slice(0, 300)}`);
@@ -467,7 +473,7 @@ export class CompletionService {
     };
     const key = activeProvider(s).apiKey;
     if (key) h["Authorization"] = `Bearer ${key}`;
-    return h;
+    return Object.assign(h, parseCustomHeaders(s.customHeaders));
   }
 
   private body(params: CompletionParams, stream: boolean): string {

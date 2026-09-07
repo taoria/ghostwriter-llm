@@ -1,5 +1,5 @@
 import { App, Notice, TFile, TFolder, Vault, requestUrl } from "obsidian";
-import { GhostwriterSettings, activeProvider, DEFAULT_SUMMARY_SYSTEM_PROMPT } from "./settings";
+import { GhostwriterSettings, activeProvider, parseCustomHeaders, DEFAULT_SUMMARY_SYSTEM_PROMPT } from "./settings";
 import { apiError, parseSSEBody } from "./completionService";
 
 export interface SummaryEntry {
@@ -230,6 +230,7 @@ export class SummaryService {
     const timeoutSec = Math.max(5, Math.floor(Number(s.requestTimeoutSec ?? 120) || 120));
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (provider.apiKey) headers["Authorization"] = `Bearer ${provider.apiKey}`;
+    Object.assign(headers, parseCustomHeaders(s.customHeaders));
 
     // Streamed like completions: some providers reject non-streamed requests whose
     // body contains typographic quotes (HTTP 500), and SSE is the reliable path.

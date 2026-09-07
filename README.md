@@ -57,7 +57,7 @@ The bottom status bar shows `Cache: ...` after each completion, and preview mode
 - **Reasoning**: optional chain-of-thought toggle and template. The CoT trigger and message roles remain in data (and in exported prompt bundles) but are no longer shown in the UI.
 - **Novel mode**: in-note paragraph summaries for fiction writing.
 - **Display & shortcuts**: preview mode, streaming, thinking preview, and keyboard shortcuts.
-- **Advanced** (collapsed): prompt restore/export/import, request timeout, max tokens, adjacent total chars, manual fallback summary, and the remaining summary generation limits.
+- **Advanced** (collapsed): prompt restore/export/import, request timeout, max tokens, custom HTTP headers, adjacent total chars, manual fallback summary, and the remaining summary generation limits.
 
 ## Demo
 

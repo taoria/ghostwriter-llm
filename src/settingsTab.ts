@@ -1,6 +1,6 @@
 import { App, Notice, PluginSettingTab, Setting, TextComponent, DropdownComponent } from "obsidian";
 import type GhostwriterPlugin from "./main";
-import { ProviderProfile, activeProvider } from "./settings";
+import { ProviderProfile, activeProvider, parseCustomHeaders } from "./settings";
 import { fetchModels } from "./completionService";
 import { SummaryEntry } from "./summaryService";
 import {
@@ -657,6 +657,22 @@ export class GhostwriterSettingTab extends PluginSettingTab {
       );
 
     new Setting(adv)
+      .setName("Custom headers")
+      .setDesc("Extra HTTP headers sent with every provider request (completions, summaries, model list). One \"Name: Value\" per line; # lines are comments. These override the defaults — e.g. set \"X-Title: obsidian\" or \"HTTP-Referer\" for OpenRouter. Leave empty to send none.")
+      .addTextArea((text) => {
+        text.inputEl.rows = 4;
+        text.inputEl.cols = 60;
+        text.inputEl.style.fontFamily = "var(--font-monospace)";
+        text
+          .setPlaceholder("X-Title: obsidian\n# HTTP-Referer: https://example.com")
+          .setValue(this.plugin.settings.customHeaders ?? "")
+          .onChange(async (value) => {
+            this.plugin.settings.customHeaders = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(adv)
       .setName("Adjacent total chars")
       .setDesc("Overall character budget for all adjacent note blocks combined (recall level 2/3). Keeps the prompt within the model's context window.")
       .addText((text) =>
@@ -806,7 +822,7 @@ export class GhostwriterSettingTab extends PluginSettingTab {
           }
           btn.setDisabled(true).setButtonText("Fetching…");
           try {
-            fetchedModels = await fetchModels(apiBaseUrl, apiKey);
+            fetchedModels = await fetchModels(apiBaseUrl, apiKey, parseCustomHeaders(this.plugin.settings.customHeaders ?? ""));
             if (!fetchedModels.length) new Notice("The provider returned no models");
             else new Notice(`Found ${fetchedModels.length} models`);
           } catch (err) {
