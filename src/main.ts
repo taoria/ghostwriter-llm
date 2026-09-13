@@ -1,12 +1,22 @@
-import { Plugin, Notice, Editor, TFile, TFolder, TAbstractFile, Modal, App } from "obsidian";
+import { Plugin, Notice, Editor, TFile, TFolder, TAbstractFile, Modal, App, SuggestModal } from "obsidian";
 import { EditorView } from "@codemirror/view";
-import { GhostwriterSettings, migrateSettings } from "./settings";
+import {
+  GhostwriterSettings,
+  ModeProfile,
+  PromptLanguage,
+  migrateSettings,
+  captureActiveMode,
+  applyModeToSettings,
+  activeMode,
+  cloneModeFromSettings,
+  defaultModeProfiles,
+} from "./settings";
 import { GhostwriterSettingTab } from "./settingsTab";
 import { CacheUsage, CompletionService, CompletionParams, formatCacheUsage, fetchModels } from "./completionService";
 import { clearGhostEffect, getGhost, ghostExtension, setGhostEffect, GhostState } from "./ghostText";
 import { ghostKeymap } from "./keymap";
 import { getPrefixSuffix, parseInNoteSummaries } from "./util";
-import { DEFAULT_NOVEL_SUMMARY_PROMPT } from "./settings";
+import { DEFAULT_NOVEL_SUMMARY_PROMPT_EN } from "./settings";
 import { GhostPopup } from "./popup";
 import { PreviewCard } from "./previewCard";
 import { SummaryService, SummaryEntry } from "./summaryService";
@@ -61,6 +71,27 @@ class InstructionModal extends Modal {
 
   onClose(): void {
     this.contentEl.empty();
+  }
+}
+
+class ModeSwitchModal extends SuggestModal<ModeProfile> {
+  constructor(app: App, private plugin: GhostwriterPlugin) {
+    super(app);
+    this.setPlaceholder("Switch writing mode…");
+  }
+
+  getSuggestions(query: string): ModeProfile[] {
+    const q = query.trim().toLowerCase();
+    return this.plugin.settings.modes.filter((m) => !q || m.name.toLowerCase().includes(q));
+  }
+
+  renderSuggestion(mode: ModeProfile, el: HTMLElement): void {
+    el.setText(mode.name);
+    if (mode.id === this.plugin.settings.activeModeId) el.addClass("is-active");
+  }
+
+  onChooseSuggestion(mode: ModeProfile): void {
+    void this.plugin.switchMode(mode.id);
   }
 }
 
@@ -126,6 +157,14 @@ export default class GhostwriterPlugin extends Plugin {
           if (!instruction) return;
           void this.triggerCompletion(editor, view, instruction);
         }).open();
+      },
+    });
+
+    this.addCommand({
+      id: "switch-writing-mode",
+      name: "Switch writing mode",
+      callback: () => {
+        new ModeSwitchModal(this.app, this).open();
       },
     });
 
@@ -321,7 +360,62 @@ export default class GhostwriterPlugin extends Plugin {
   }
 
   async saveSettings() {
+    captureActiveMode(this.settings);
     await this.saveData(this.settings);
+  }
+
+  /** Switch the active writing mode: persist the current one, then load the target. */
+  async switchMode(id: string): Promise<void> {
+    const s = this.settings;
+    const target = s.modes.find((m) => m.id === id);
+    if (!target || target.id === s.activeModeId) return;
+    captureActiveMode(s);
+    s.activeModeId = target.id;
+    applyModeToSettings(s, target);
+    await this.saveSettings();
+    this.updateStatusBar();
+    new Notice(`Writing mode: ${target.name}`);
+  }
+
+  /** Create a new mode cloned from the current live values and activate it. */
+  async addMode(name: string): Promise<void> {
+    const s = this.settings;
+    captureActiveMode(s);
+    const mode = cloneModeFromSettings(s, name.trim() || `Mode ${s.modes.length + 1}`);
+    s.modes.push(mode);
+    s.activeModeId = mode.id;
+    applyModeToSettings(s, mode);
+    await this.saveSettings();
+    new Notice(`Mode "${mode.name}" added`);
+  }
+
+  async deleteMode(id: string): Promise<void> {
+    const s = this.settings;
+    if (s.modes.length <= 1) return;
+    const idx = s.modes.findIndex((m) => m.id === id);
+    if (idx < 0) return;
+    const removed = s.modes.splice(idx, 1)[0];
+    if (s.activeModeId === id) {
+      s.activeModeId = s.modes[0].id;
+      applyModeToSettings(s, s.modes[0]);
+    }
+    await this.saveSettings();
+    new Notice(`Mode "${removed.name}" deleted`);
+  }
+
+  /** Reset the active mode's prompt/context/recall/summary fields to built-in defaults. */
+  async restoreModeDefaults(lang: PromptLanguage): Promise<void> {
+    const s = this.settings;
+    const m = activeMode(s);
+    if (!m) return;
+    const builtin = defaultModeProfiles(lang).find((d) => d.id === m.id) ?? defaultModeProfiles(lang)[0];
+    for (const k of Object.keys(builtin) as (keyof ModeProfile)[]) {
+      if (k === "id" || k === "name") continue;
+      (m as unknown as Record<string, unknown>)[k] = builtin[k];
+    }
+    applyModeToSettings(s, m);
+    await this.saveSettings();
+    new Notice(`Mode "${m.name}" restored to ${lang === "zh" ? "中文" : "English"} defaults`);
   }
 
   private getViewFromEditor(editor: Editor): EditorView | null {
@@ -478,12 +572,13 @@ export default class GhostwriterPlugin extends Plugin {
   }
 
   /**
-   * Build the cursor context. Whenever the full text before the cursor contains
-   * in-note summary blocks (`[Summary]` / `[摘要]` markers anywhere in a line), the
-   * summarized text is not sent raw: the summaries are injected immediately before
-   * the unsummarized tail (both inside {prefix}, summaries first). With no summaries
-   * present: Novel mode sends the full preceding text; otherwise the legacy
-   * prefix/suffix window is used.
+   * Build the cursor context according to the active mode's context strategy:
+   * - "in-note": in-note summary blocks (`[Summary]` / `[摘要]` markers anywhere
+   *   in a line) are detected; the summarized text is not sent raw — the summaries
+   *   are injected immediately before the unsummarized tail (inside {prefix}).
+   *   With no markers it falls back to the full preceding text.
+   * - "full": the whole text before the cursor.
+   * - "window": the legacy prefix/suffix window.
    */
   private buildContext(editor: Editor): { prefix: string; suffix: string } {
     const cursor = editor.getCursor("head");
@@ -492,20 +587,22 @@ export default class GhostwriterPlugin extends Plugin {
     const suffix = editor.getRange(cursor, docEnd).slice(0, Math.max(0, this.settings.suffixChars));
 
     const fullPrefix = editor.getRange({ line: 0, ch: 0 }, cursor);
-    const parsed = parseInNoteSummaries(fullPrefix);
+    const mode = this.settings.contextMode ?? "window";
 
-    if (parsed.hasAny) {
-      // In-note summaries detected (automatic): summaries first, then the tail.
-      const cap = Math.max(0, this.settings.prefixChars);
-      let tail = parsed.tail.replace(/^[\s\r\n]+/, "").replace(/[\s\r\n]+$/, "");
-      if (cap > 0 && tail.length > cap) tail = tail.slice(tail.length - cap);
-      const block = parsed.summaries.map((s, idx) => `[Summary ${idx + 1}] ${s}`).join("\n");
-      const prefix = tail ? `${block}\n\n${tail}` : block;
-      return { prefix, suffix };
+    if (mode === "in-note") {
+      const parsed = parseInNoteSummaries(fullPrefix);
+      if (parsed.hasAny) {
+        const cap = Math.max(0, this.settings.prefixChars);
+        let tail = parsed.tail.replace(/^[\s\r\n]+/, "").replace(/[\s\r\n]+$/, "");
+        if (cap > 0 && tail.length > cap) tail = tail.slice(tail.length - cap);
+        const block = parsed.summaries.map((s, idx) => `[Summary ${idx + 1}] ${s}`).join("\n");
+        const prefix = tail ? `${block}\n\n${tail}` : block;
+        return { prefix, suffix };
+      }
+      return { prefix: fullPrefix, suffix };
     }
 
-    if (this.settings.novelMode) {
-      // Novel mode with no summaries: send the full preceding text.
+    if (mode === "full") {
       return { prefix: fullPrefix, suffix };
     }
 
@@ -882,7 +979,7 @@ export default class GhostwriterPlugin extends Plugin {
   }
 
   /**
-   * Novel mode: summarize the selected paragraph(s) and append the result
+   * In-note summary: summarize the selected paragraph(s) and append the result
    * right after them as `> [Summary] …`.
    */
   private async generateInNoteSummary(editor: Editor): Promise<void> {
@@ -905,7 +1002,7 @@ export default class GhostwriterPlugin extends Plugin {
     const rec = this.beginSummaryOp("in-note-summary", text.slice(0, 40) + (text.length > 40 ? "…" : ""));
     try {
       const summary = await this.summaryService.generateForText(text, ac.signal, {
-        systemPrompt: this.settings.novelSummaryPrompt || DEFAULT_NOVEL_SUMMARY_PROMPT,
+        systemPrompt: this.settings.inNoteSummaryPrompt || DEFAULT_NOVEL_SUMMARY_PROMPT_EN,
         maxWords: this.settings.summaryMaxWords,
       });
       if (ac.signal.aborted) {

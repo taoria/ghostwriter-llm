@@ -1,16 +1,18 @@
 import { App, Notice, PluginSettingTab, Setting, TextComponent, DropdownComponent } from "obsidian";
 import type GhostwriterPlugin from "./main";
-import { ProviderProfile, activeProvider, parseCustomHeaders } from "./settings";
+import { ProviderProfile, activeProvider, activeMode, parseCustomHeaders } from "./settings";
 import { fetchModels } from "./completionService";
 import { SummaryEntry } from "./summaryService";
 import {
   DEFAULT_SYSTEM_PROMPT,
   DEFAULT_PROMPT_TEMPLATE,
   DEFAULT_COT_TEMPLATE,
-  DEFAULT_NOVEL_SUMMARY_PROMPT,
+  DEFAULT_NOVEL_SUMMARY_PROMPT_EN,
   defaultPromptsFor,
   PromptLanguage,
   PromptBundle,
+  ModeProfile,
+  ContextMode,
   PROMPT_BUNDLE_VERSION,
   PROMPT_BUNDLE_MAGIC,
 } from "./settings";
@@ -177,7 +179,101 @@ export class GhostwriterSettingTab extends PluginSettingTab {
       );
     }
 
-    section("Generation limits", "Soft limits shared by every provider. The request timeout and the hard token cap are in Advanced below.");
+    section("Writing modes", "Each mode is a named preset of prompts, context, recall, CoT and summary settings. Providers, the summary folder/scan limit, and UI options stay global.");
+
+    const modes = (): ModeProfile[] => s().modes;
+    const currentMode = (): ModeProfile | undefined => activeMode(s());
+
+    if (modes().length > 0) {
+      new Setting(containerEl)
+        .setName("Active mode")
+        .setDesc("Switching loads that mode's prompts, context and recall settings.")
+        .addDropdown((dd) => {
+          const opts: Record<string, string> = {};
+          for (const m of modes()) opts[m.id] = m.name || m.id;
+          dd.addOptions(opts);
+          dd.setValue(s().activeModeId);
+          dd.onChange(async (id) => {
+            await this.plugin.switchMode(id);
+            this.display();
+          });
+        })
+        .addButton((btn) => {
+          btn.setButtonText("Duplicate")
+            .setTooltip("Create a copy of the active mode")
+            .onClick(async () => {
+              const cur = currentMode();
+              await this.plugin.addMode(`${cur?.name ?? "Mode"} copy`);
+              this.display();
+            });
+        })
+        .addButton((btn) => {
+          btn.setButtonText("Delete")
+            .setIcon("trash")
+            .setClass("mod-warning")
+            .setTooltip("Delete the active mode")
+            .setDisabled(modes().length <= 1)
+            .onClick(async () => {
+              const cur = currentMode();
+              if (!cur) return;
+              await this.plugin.deleteMode(cur.id);
+              this.display();
+            });
+        });
+    }
+
+    const curMode = currentMode();
+    if (curMode) {
+      new Setting(containerEl)
+        .setName("Mode name")
+        .setDesc("Display name of the active mode.")
+        .addText((text) =>
+          text.setValue(curMode.name).onChange(async (value) => {
+            curMode.name = value;
+            await this.plugin.saveSettings();
+          })
+        );
+    }
+
+    const newModeName = { value: "" };
+    new Setting(containerEl)
+      .setName("Add mode")
+      .setDesc("Create a new mode pre-filled with the active mode's values.")
+      .addText((text) => {
+        text.setPlaceholder("Mode name");
+        text.onChange((v) => {
+          newModeName.value = v;
+        });
+      })
+      .addButton((btn) => {
+        btn.setButtonText("Add").setCta().onClick(async () => {
+          await this.plugin.addMode(newModeName.value.trim());
+          this.display();
+        });
+      });
+
+    new Setting(containerEl)
+      .setName("Default prompt language")
+      .setDesc("Language used for built-in prompt defaults when restoring a mode to its defaults.")
+      .addDropdown((dd) => {
+        dd.addOptions({ zh: "中文 (Chinese)", en: "English" });
+        dd.setValue(s().promptLanguage);
+        dd.onChange(async (value) => {
+          s().promptLanguage = value as PromptLanguage;
+          await this.plugin.saveSettings();
+        });
+      })
+      .addButton((btn) => {
+        btn.setButtonText("Restore active mode")
+          .setClass("mod-warning")
+          .setTooltip("Replace the active mode's prompts/context/recall/summary settings with built-in defaults")
+          .onClick(async () => {
+            await this.plugin.restoreModeDefaults(s().promptLanguage);
+            this.display();
+          });
+      });
+
+    section("Generation limits", "Soft limits for the active writing mode. The request timeout and the hard token cap are in Advanced below.");
 
     new Setting(containerEl)
       .setName("Max words")
@@ -208,7 +304,7 @@ export class GhostwriterSettingTab extends PluginSettingTab {
           })
       );
 
-    section("Prompt & context", "Control the text sent around the cursor and the main completion instructions.");
+    section("Prompt & context", "Text sent around the cursor and the main completion instructions for the active writing mode.");
     new Setting(containerEl)
       .setName("System prompt")
       .setDesc("Instructions sent as the system message. Supports placeholders: {max_words}, {title}. Controls completion behavior.")
@@ -281,7 +377,7 @@ export class GhostwriterSettingTab extends PluginSettingTab {
           })
       );
 
-    section("Recall level", "Control how much context is collected into the completion prompt.");
+    section("Recall level", "How much context is collected into the completion prompt for the active writing mode.");
     new Setting(containerEl)
       .setName("Recall level")
       .setDesc("0 = cursor context only (no recall blocks). 1 = context + summaries (default). 2 = also inject linked adjacent notes (see depth below). 3 = full current note + all linked notes, summaries excluded.")
@@ -347,7 +443,7 @@ export class GhostwriterSettingTab extends PluginSettingTab {
           })
       );
 
-    section("Summary recall", "Inject manually generated summaries from the configured summary folder into completion context.");
+    section("Summary recall", "Inject generated summaries into completion context. Whether summaries are injected and the generation parameters (model, max words/tokens, temperature, input chars) belong to the active writing mode; the folder, scan limit and per-file switches are global.");
     new Setting(containerEl)
       .setName("Summary recall")
       .setDesc("Master switch. When on, the plugin scans the configured summary subfolder for `summary-{number}.md` files and injects them as the {summary} context (current note first, then others alphabetically). When off, no summaries are injected. A session toggle (status bar / command) ANDs with this.")
@@ -456,7 +552,7 @@ export class GhostwriterSettingTab extends PluginSettingTab {
           })
       );
 
-    section("Reasoning", "Optionally ask the model to think before producing the final completion.");
+    section("Reasoning", "Optionally ask the model to think before producing the final completion (active writing mode).");
     new Setting(containerEl)
       .setName("Chain-of-thought (CoT)")
       .setDesc("Enable thinking-then-completion. The model is asked to reason inside <thinking>...</thinking> then output the final text inside <completion>...</completion>. The thinking part is stripped so only the completion shows as ghost text.")
@@ -483,29 +579,33 @@ export class GhostwriterSettingTab extends PluginSettingTab {
           });
       });
 
-    section("Novel mode", "Paragraph-level in-note summaries for fiction writing.");
+    section("Context strategy", "How the text before the cursor is assembled for the active mode.");
     new Setting(containerEl)
-      .setName("Novel mode")
-      .setDesc("In-note summary blocks (`[Summary]` / `[摘要]` markers, anywhere in a line) are always detected automatically: once any exist before the cursor, the summarized text is not sent raw — all summaries are injected immediately before the unsummarized text (both inside the prefix). This toggle only controls the no-summary fallback: when on, the full preceding text is sent even without summaries; when off, the normal prefix window is used.")
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.novelMode)
-          .onChange(async (value) => {
-            this.plugin.settings.novelMode = value;
-            await this.plugin.saveSettings();
-          })
-      );
+      .setName("Context strategy")
+      .setDesc("window = fixed prefix/suffix window; full = the whole preceding text; in-note = detect [Summary]/[摘要] blocks and send the summaries immediately before the unsummarized text (falls back to the full text when none are found).")
+      .addDropdown((dd) => {
+        dd.addOptions({
+          window: "window · prefix/suffix window",
+          full: "full · whole preceding text",
+          "in-note": "in-note · summaries + unsummarized tail",
+        });
+        dd.setValue(this.plugin.settings.contextMode ?? "window");
+        dd.onChange(async (value) => {
+          this.plugin.settings.contextMode = value as ContextMode;
+          await this.plugin.saveSettings();
+        });
+      });
 
     new Setting(containerEl)
-      .setName("Novel summary prompt")
+      .setName("In-note summary prompt")
       .setDesc("System prompt used by “Generate In-Note Summary” (records events and plot, no thematic elevation). Placeholder: {max_words}.")
       .addTextArea((text) => {
         text.inputEl.rows = 7;
         text.inputEl.cols = 60;
         text
-          .setValue(this.plugin.settings.novelSummaryPrompt || DEFAULT_NOVEL_SUMMARY_PROMPT)
+          .setValue(this.plugin.settings.inNoteSummaryPrompt || DEFAULT_NOVEL_SUMMARY_PROMPT_EN)
           .onChange(async (value) => {
-            this.plugin.settings.novelSummaryPrompt = value;
+            this.plugin.settings.inNoteSummaryPrompt = value;
             await this.plugin.saveSettings();
           });
       });
