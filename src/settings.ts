@@ -19,6 +19,21 @@ export interface ProviderProfile {
 }
 
 /**
+ * A note pinned into every completion prompt ("global context"). The note does
+ * not have to be the current one. Its content is rendered according to the
+ * context strategy: "follow" uses the active mode, otherwise the item overrides.
+ */
+export interface HookItem {
+  id: string;
+  /** Vault-relative path of the injected note. */
+  path: string;
+  enabled: boolean;
+  contextMode: "follow" | ContextMode;
+  /** Character cap for this note; 0 = mode default (prefixChars, or the whole note in "full"). */
+  maxChars: number;
+}
+
+/**
  * A named writing preset. Modes own the prompt/context/recall/CoT/summary-sending
  * settings; providers, summary file generation and UI options stay global.
  */
@@ -128,6 +143,11 @@ export interface GhostwriterSettings {
   promptTemplateRole: MessageRole;
   previewMode: boolean;
   peekCoT: boolean;
+  /** Show the fully assembled prompt in a confirmation dialog before sending the request. */
+  promptPreviewBeforeSend: boolean;
+  /** Master switch for notes pinned into every prompt. */
+  globalHooksEnabled: boolean;
+  globalHooks: HookItem[];
   contextMode: ContextMode;
   inNoteSummaryPrompt: string;
   acceptKey: string;
@@ -153,6 +173,9 @@ export const DEFAULT_PROMPT_TEMPLATE = `[Note title]
 
 [Note summary]
 {summary}
+
+[Global context]
+{hooks}
 
 [Extra instructions]
 {extra}
@@ -184,6 +207,9 @@ export const DEFAULT_PROMPT_TEMPLATE_ZH = `[笔记标题]
 
 [笔记摘要]
 {summary}
+
+[全局上下文]
+{hooks}
 
 [额外指令]
 {extra}
@@ -295,6 +321,9 @@ export const DEFAULT_OUTLINE_PROMPT_TEMPLATE = `[Note title]
 [Existing notes / background]
 {summary}
 
+[Global context]
+{hooks}
+
 [Extra instructions]
 {extra}
 
@@ -332,6 +361,9 @@ export const DEFAULT_NOVEL_PROMPT_TEMPLATE_ZH = `[笔记标题]
 [笔记摘要]
 {summary}
 
+[全局上下文]
+{hooks}
+
 [额外指令]
 {extra}
 
@@ -364,6 +396,9 @@ export const DEFAULT_OUTLINE_PROMPT_TEMPLATE_ZH = `[笔记标题]
 
 [现有笔记 / 背景]
 {summary}
+
+[全局上下文]
+{hooks}
 
 [额外指令]
 {extra}
@@ -559,6 +594,9 @@ export const DEFAULT_SETTINGS: GhostwriterSettings = {
   promptTemplateRole: "user",
   previewMode: false,
   peekCoT: false,
+  promptPreviewBeforeSend: false,
+  globalHooksEnabled: false,
+  globalHooks: [],
   contextMode: "window",
   inNoteSummaryPrompt: DEFAULT_NOVEL_SUMMARY_PROMPT_EN,
   acceptKey: "Shift+Insert",
@@ -615,6 +653,29 @@ const LEGACY_SETTING_KEYS = [
 
 const asStrings = (arr: unknown): string[] =>
   Array.isArray(arr) ? arr.filter((p): p is string => typeof p === "string") : [];
+
+function normalizeHooks(raw: unknown): HookItem[] {
+  if (!Array.isArray(raw)) return [];
+  const out: HookItem[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const r = item as Record<string, unknown>;
+    const path = typeof r.path === "string" ? r.path.trim() : "";
+    if (!path) continue;
+    const mode = r.contextMode === "window" || r.contextMode === "full" || r.contextMode === "in-note"
+      ? r.contextMode
+      : "follow";
+    const cap = Math.floor(Number(r.maxChars ?? 0));
+    out.push({
+      id: typeof r.id === "string" && r.id ? r.id : makeModeId(),
+      path,
+      enabled: r.enabled !== false,
+      contextMode: mode,
+      maxChars: Number.isFinite(cap) && cap > 0 ? cap : 0,
+    });
+  }
+  return out;
+}
 
 const CJK_RE = /[\u3400-\u9fff\uf900-\ufaff]/;
 
@@ -761,6 +822,10 @@ export function migrateSettings(raw: unknown): GhostwriterSettings {
   s.disabledSummaryFiles = [
     ...new Set([...asStrings(s.disabledSummaryFiles), ...asStrings(data.summaryDisabledPaths)]),
   ];
+
+  s.globalHooksEnabled = data.globalHooksEnabled === true;
+  s.globalHooks = normalizeHooks(s.globalHooks);
+  s.promptPreviewBeforeSend = data.promptPreviewBeforeSend === true;
 
   const tSec = Math.floor(Number(s.requestTimeoutSec ?? 120));
   s.requestTimeoutSec = Math.max(5, Number.isFinite(tSec) ? tSec : 120);

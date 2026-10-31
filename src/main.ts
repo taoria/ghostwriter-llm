@@ -19,6 +19,8 @@ import { getPrefixSuffix, parseInNoteSummaries } from "./util";
 import { DEFAULT_NOVEL_SUMMARY_PROMPT_EN } from "./settings";
 import { GhostPopup } from "./popup";
 import { PreviewCard } from "./previewCard";
+import { PromptPreviewModal } from "./promptPreviewModal";
+import { GlobalHooksModal } from "./globalHooksModal";
 import { SummaryService, SummaryEntry } from "./summaryService";
 import { SummaryOpRecord, SummaryStatusModal } from "./summaryStatusModal";
 
@@ -165,6 +167,14 @@ export default class GhostwriterPlugin extends Plugin {
       name: "Switch writing mode",
       callback: () => {
         new ModeSwitchModal(this.app, this).open();
+      },
+    });
+
+    this.addCommand({
+      id: "manage-global-hooks",
+      name: "Manage global context hooks",
+      callback: () => {
+        this.openGlobalHooks();
       },
     });
 
@@ -341,6 +351,10 @@ export default class GhostwriterPlugin extends Plugin {
     new SummaryStatusModal(this.app, this).open();
   }
 
+  openGlobalHooks(): void {
+    new GlobalHooksModal(this.app, this).open();
+  }
+
   onunload() {
     this.popup?.destroy();
     this.preview?.close();
@@ -471,6 +485,12 @@ export default class GhostwriterPlugin extends Plugin {
         console.warn("summary build failed", err);
       }
     }
+    let hooks = "";
+    try {
+      hooks = await this.buildHookContext(ac.signal);
+    } catch (err) {
+      console.warn("global hooks build failed", err);
+    }
     if (ac.signal.aborted) {
       this.popup.hide();
       return;
@@ -482,6 +502,7 @@ export default class GhostwriterPlugin extends Plugin {
       prefix: ctx.prefix,
       suffix: ctx.suffix,
       summary,
+      hooks,
       title,
       instruction,
     };
@@ -492,13 +513,82 @@ export default class GhostwriterPlugin extends Plugin {
     const cursorPos = view.state.selection.main.head;
     this.currentPos = cursorPos;
 
+    this.startCompletionRun(params, view, cursorPos, ac);
+  }
+
+  /** Optionally show the assembled prompt for confirmation before the request is sent. */
+  private startCompletionRun(params: CompletionParams, view: EditorView, pos: number, ac: AbortController): void {
+    if (this.settings.promptPreviewBeforeSend) {
+      let payload: ReturnType<CompletionService["buildPayload"]>;
+      try {
+        payload = this.service.buildPayload(params, this.settings.stream);
+      } catch (err) {
+        this.popup.hide();
+        this.abortCurrent();
+        new Notice(`Cannot build prompt: ${(err as Error).message}`, 10000);
+        return;
+      }
+      this.popup.hide();
+      new PromptPreviewModal(this.app, payload, {
+        onSend: () => this.launchCompletion(params, view, pos, ac),
+        onCancel: () => {
+          this.popup.hide();
+          this.abortCurrent();
+        },
+      }).open();
+      return;
+    }
+    this.launchCompletion(params, view, pos, ac);
+  }
+
+  private launchCompletion(params: CompletionParams, view: EditorView, pos: number, ac: AbortController): void {
     if (this.settings.previewMode) {
       this.popup.hide();
-      this.runPreviewCompletion(params, view, cursorPos, ac);
+      this.runPreviewCompletion(params, view, pos, ac);
     } else {
-      this.popup.showLoading(view, cursorPos);
-      this.runInlineCompletion(params, view, cursorPos, ac);
+      this.popup.showLoading(view, pos);
+      this.runInlineCompletion(params, view, pos, ac);
     }
+  }
+
+  /**
+   * Assemble the global-hook blocks: notes pinned into every prompt, rendered
+   * with the active (or per-item override) context strategy.
+   */
+  private async buildHookContext(signal: AbortSignal): Promise<string> {
+    const s = this.settings;
+    if (!s.globalHooksEnabled || !s.globalHooks.length) return "";
+    const active = this.app.workspace.getActiveFile();
+    const blocks: string[] = [];
+    for (const hook of s.globalHooks) {
+      if (signal.aborted) return "";
+      if (!hook.enabled) continue;
+      if (active && hook.path === active.path) continue;
+      const file = this.app.vault.getAbstractFileByPath(hook.path);
+      if (!(file instanceof TFile) || !file.path.toLowerCase().endsWith(".md")) continue;
+      let raw = "";
+      try {
+        raw = await this.app.vault.cachedRead(file);
+      } catch {
+        continue;
+      }
+      const mode = hook.contextMode === "follow" ? (s.contextMode ?? "window") : hook.contextMode;
+      const cap = hook.maxChars > 0 ? hook.maxChars : Math.max(0, s.prefixChars);
+      let content = raw;
+      if (mode === "in-note") {
+        const parsed = parseInNoteSummaries(raw);
+        if (parsed.hasAny) {
+          const summaries = parsed.summaries.map((x) => `[Summary] ${x}`).join("\n");
+          const tail = parsed.tail.trim();
+          content = tail ? `${summaries}\n\n${tail}` : summaries;
+        }
+      }
+      content = content.trim();
+      if (mode !== "full" && cap > 0 && content.length > cap) content = content.slice(0, cap);
+      if (!content) continue;
+      blocks.push(`[Global context: ${file.basename}]\n${content}`);
+    }
+    return blocks.join("\n\n");
   }
 
   private async buildSummaryContext(signal: AbortSignal): Promise<string> {
@@ -1057,11 +1147,15 @@ export default class GhostwriterPlugin extends Plugin {
     params.prefix = ctx.prefix;
     params.suffix = ctx.suffix;
     params.title = this.getActiveNoteTitle();
-    if (this.settings.previewMode) {
-      this.runPreviewCompletion(params, view, cursorPos, ac);
-    } else {
-      this.popup.showLoading(view, cursorPos);
-      this.runInlineCompletion(params, view, cursorPos, ac);
+    try {
+      params.hooks = await this.buildHookContext(ac.signal);
+    } catch (err) {
+      console.warn("regenerate hooks build failed", err);
     }
+    if (ac.signal.aborted) {
+      this.popup.hide();
+      return;
+    }
+    this.startCompletionRun(params, view, cursorPos, ac);
   }
 }

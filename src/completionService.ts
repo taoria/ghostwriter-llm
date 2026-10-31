@@ -16,6 +16,8 @@ export interface CompletionParams {
   suffix: string;
   summary: string;
   title: string;
+  /** Already-rendered global-hook blocks ([Global context: …] …). */
+  hooks?: string;
   /** Short user requirement for this continuation (from the instruction hotkey). Injected at {extra}. */
   instruction?: string;
 }
@@ -42,11 +44,12 @@ interface ChatMessage {
 
 export function fillTemplate(
   template: string,
-  vars: { summary: string; extra: string; prefix: string; suffix: string; maxWords: number; title: string }
+  vars: { summary: string; hooks: string; extra: string; prefix: string; suffix: string; maxWords: number; title: string }
 ): string {
   const safe = (s: string) => s ?? "";
   return template
     .replace(/\{summary\}/g, safe(vars.summary))
+    .replace(/\{hooks\}/g, safe(vars.hooks))
     .replace(/\{extra\}/g, safe(vars.extra))
     .replace(/\{prefix\}/g, safe(vars.prefix))
     .replace(/\{suffix\}/g, safe(vars.suffix))
@@ -56,13 +59,21 @@ export function fillTemplate(
 
 export function buildMessages(p: CompletionParams, settings: GhostwriterSettings): ChatMessage[] {
   const summary = p.summary?.trim() ?? "";
+  const hooks = p.hooks?.trim() ?? "";
   const extra = settings.extraPrompt?.trim() ?? "";
   const title = p.title?.trim() ?? "";
   const tpl = settings.promptTemplate && settings.promptTemplate.trim()
     ? settings.promptTemplate
     : DEFAULT_PROMPT_TEMPLATE;
+  // Older custom templates have no {hooks} slot: fold the hook blocks into {summary}
+  // so they are still sent instead of being silently dropped.
+  const hasHooksSlot = tpl.includes("{hooks}");
+  const summaryWithHooks = hooks && !hasHooksSlot
+    ? [summary, hooks].filter(Boolean).join("\n\n")
+    : summary;
   const promptContent = fillTemplate(tpl, {
-    summary,
+    summary: summaryWithHooks,
+    hooks,
     extra,
     prefix: p.prefix,
     suffix: p.suffix,
@@ -74,6 +85,7 @@ export function buildMessages(p: CompletionParams, settings: GhostwriterSettings
 
   const systemContent = fillTemplate(settings.systemPrompt, {
     summary: "",
+    hooks: "",
     extra: "",
     prefix: "",
     suffix: "",

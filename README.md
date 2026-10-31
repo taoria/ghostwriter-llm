@@ -12,6 +12,8 @@ GitHub Copilot-style inline writing completion for Obsidian, powered by an OpenA
 - Configurable prompt templates, message roles, and completion context.
 - OpenAI-compatible providers, including local servers such as llama.cpp.
 - Manually generated note summaries stored as `summary-{number}.md` files, plus in-note paragraph summaries (`Generate In-Note Summary`).
+- Global context hooks: pin other notes into every prompt, managed from a dedicated dialog, each rendered with the active context strategy or its own override.
+- Optional pre-send prompt preview: inspect the fully assembled messages and confirm before the request goes out.
 - Prompt cache hit-rate reporting for providers such as DeepSeek.
 - Configurable accept and dismiss shortcuts.
 
@@ -65,11 +67,29 @@ A **writing mode** is a named preset. It owns the system prompt, prompt template
 
 Use the **Active mode** dropdown, the `Switch writing mode` command, or a per-vault shortcut to switch. Modes can be renamed, duplicated, added, deleted, and restored to their built-in defaults (in either language). Providers, the summary folder/scan limit, per-file summary switches and UI options stay global.
 
+Templates support the placeholders `{title}`, `{summary}`, `{hooks}`, `{extra}`, `{prefix}`, `{suffix}`, `{max_words}` and `<<<CURSOR>>>`/`<<<光标>>>`.
+
+## Global Context Hooks
+
+Global hooks always inject other notes (never only the current one) into the prompt. Open **Manage global context hooks** (settings or command palette) to add notes, enable/disable each item, reorder them, and pick a per-item context strategy:
+
+- `follow mode` — use the active writing mode's strategy.
+- `window` — beginning of the note, capped by the mode's prefix size (or the item's own cap).
+- `full` — the whole note.
+- `in-note` — replace `[Summary]` blocks with their summaries, then the unsummarized tail.
+
+Each item also has an optional character cap (`0` = mode default). Hooks render as `[Global context: <note title>]` blocks at the `{hooks}` placeholder. Custom templates without `{hooks}` have the blocks appended to `{summary}` so nothing is silently dropped.
+
+## Pre-send Prompt Preview
+
+Enable **Preview prompt before sending** to inspect the fully assembled request — system, CoT and prompt messages plus model/token settings — in a dialog with **Send** and **Cancel**. It works in both inline and preview modes, and **Copy JSON** copies the exact payload. The regular `Preview mode` still shows the prompt alongside the streaming completion.
+
 ## Commands
 
 - `Trigger LLM completion at cursor`
 - `Trigger LLM completion with an instruction` (default `Mod+Shift+Enter`)
 - `Switch writing mode`
+- `Manage global context hooks`
 - `Generate In-Note Summary` (default `Mod+Shift+S`)
 - `Generate summary for current note`
 - `Show summary status`
@@ -87,7 +107,8 @@ Use the **Active mode** dropdown, the `Switch writing mode` command, or a per-va
 - **Summary recall**: the injection toggle, generation model/max words/max tokens/temperature/input chars, and in-note summary prompt are per mode; the summary folder, scan limit, per-file switches and status panel are global.
 - **Reasoning** (per mode): optional chain-of-thought toggle and template. The CoT trigger and message roles remain in data (and in exported prompt bundles) but are no longer shown in the UI.
 - **Context strategy** (per mode): `window`, `full` or `in-note` (see Writing Modes above), plus the in-note summary generation prompt.
-- **Display & shortcuts**: preview mode, streaming, thinking preview, and keyboard shortcuts.
+- **Global hooks**: master switch and the management dialog for notes pinned into every prompt.
+- **Display & shortcuts**: preview mode, pre-send prompt preview, streaming, thinking preview, and keyboard shortcuts.
 - **Advanced** (collapsed): prompt restore/export/import, request timeout, max tokens, custom HTTP headers, adjacent total chars, manual fallback summary, and the remaining summary generation limits.
 
 ## Demo

@@ -610,6 +610,25 @@ export class GhostwriterSettingTab extends PluginSettingTab {
           });
       });
 
+    section("Global hooks", "Pin notes (not necessarily the current one) into every completion prompt. Each hook is rendered with the active context strategy, or with its own override, and injected at {hooks} (older templates without {hooks} get them appended to the summary).");
+
+    new Setting(containerEl)
+      .setName("Enable global hooks")
+      .setDesc("Master switch. Manage the note list in the hooks dialog.")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.globalHooksEnabled)
+          .onChange(async (value) => {
+            this.plugin.settings.globalHooksEnabled = value;
+            await this.plugin.saveSettings();
+          })
+      )
+      .addButton((btn) => {
+        btn.setButtonText("Manage hooks…").onClick(() => {
+          this.plugin.openGlobalHooks();
+        });
+      });
+
     section("Display & shortcuts", "Choose how suggestions are shown and configure the keys used to accept or dismiss them.");
     new Setting(containerEl)
       .setName("Preview mode")
@@ -619,6 +638,18 @@ export class GhostwriterSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.previewMode)
           .onChange(async (value) => {
             this.plugin.settings.previewMode = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Preview prompt before sending")
+      .setDesc("Show the fully assembled prompt (all messages plus model/token settings) in a confirmation dialog. Click Send to issue the request, or Cancel to abort. Works in both inline and preview mode.")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.promptPreviewBeforeSend)
+          .onChange(async (value) => {
+            this.plugin.settings.promptPreviewBeforeSend = value;
             await this.plugin.saveSettings();
           })
       );
