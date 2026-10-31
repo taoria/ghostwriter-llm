@@ -1,129 +1,65 @@
 # Ghostwriter LLM for Obsidian
 
-GitHub Copilot-style inline writing completion for Obsidian, powered by an OpenAI-compatible chat-completions API.
+GitHub Copilot-style inline writing completion for Obsidian, using any OpenAI-compatible chat-completions API.
+
+![Ghostwriter LLM demo](demo.gif)
 
 ## Features
 
-- Inline ghost-text completion at the cursor.
-- Streaming responses with optional thinking preview.
-- Preview mode for reviewing a completion before insertion.
-- Named **writing modes** (presets): Note, Novel and Outline ship built in, each owning its own prompts, context strategy, recall, CoT and summary settings.
-- Three context strategies per mode: `window` (fixed prefix/suffix window), `full` (the whole preceding text), and `in-note` (detect `[Summary]` / `[摘要]` blocks and send the summaries immediately before the unsummarized text).
-- Configurable prompt templates, message roles, and completion context.
-- OpenAI-compatible providers, including local servers such as llama.cpp.
-- Manually generated note summaries stored as `summary-{number}.md` files, plus in-note paragraph summaries (`Generate In-Note Summary`).
-- Global context hooks: pin other notes into every prompt, managed from a dedicated dialog, each rendered with the active context strategy or its own override.
-- Optional pre-send prompt preview: inspect the fully assembled messages and confirm before the request goes out.
-- Prompt cache hit-rate reporting for providers such as DeepSeek.
-- Configurable accept and dismiss shortcuts.
+- Inline ghost text at the cursor, streaming, with an optional thinking preview.
+- **Writing modes**: named presets with their own prompts, CoT, recall, context strategy and summary settings.
+- **Global hooks**: pin other notes into every prompt.
+- **In-note summaries** for long fiction (`[Summary]` / `[摘要]` blocks).
+- Separate note summaries (`summary-N.md`) with link-following recall.
+- Optional pre-send prompt preview, prompt-cache hit-rate reporting, configurable accept/dismiss keys.
 
 ## Quick Start
 
-1. Build the plugin with `npm install` followed by `npm run build`.
-2. The build publishes `main.js`, `styles.css`, and `manifest.json` to the configured local test vault.
-3. In Obsidian, open the plugin settings and configure the API base URL, API key, and model.
-4. Run the command `Trigger LLM completion at cursor`.
-5. Accept the suggestion with `Shift+Insert` or dismiss it with `Escape`.
+1. `npm install && npm run build` — typechecks, bundles, and publishes to `test/test/.obsidian/plugins/ghostwriter-llm/`.
+2. In Obsidian → plugin settings, add a provider (Base URL, API key, model) and pick a writing mode.
+3. Run `Trigger LLM completion at cursor`; accept with `Shift+Insert`, dismiss with `Escape`.
 
-The default publish directory is:
-
-```text
-test/test/.obsidian/plugins/ghostwriter-llm/
-```
-
-To publish to another local directory, set `OBSIDIAN_PLUGIN_DEST` before running `npm run publish`.
-
-## Summaries
-
-Summaries are never written into the source note. The `Generate summary for current note` command creates or updates a separate file in the configured summary folder, which defaults to `summaries/`.
-
-Each generated file uses this format:
-
-```markdown
----
-source: "path/to/note.md"
----
-
-The manually generated summary text.
-```
-
-Summary generation is manual. Summary injection can be enabled or disabled per writing mode in settings (`Summary recall`), or temporarily with the `Summary: ON/OFF` status-bar item or the `Toggle summary injection (session)` command. The `Note summary: ON/OFF` status-bar item and `Toggle current note summary injection` command persistently exclude or include the active note's summary without affecting other summaries.
-
-### In-note summaries
-
-For long fiction, `Generate In-Note Summary` (default `Mod+Shift+S`) summarizes the selected paragraph(s) and inserts the result right after them as a `> [Summary] …` block. When a mode uses the `in-note` context strategy, every such block before the cursor is collected and the summarized text is **not** sent raw — the summaries are injected immediately before the unsummarized tail, so the model sees the plot so far without the full prose. The marker is recognized anywhere in a line (`> [Summary] …`, `text > [Summary] …`, `[摘要] …`, `【摘要】…`). With no markers present, `in-note` falls back to sending the full preceding text.
-
-The bottom status bar shows `Cache: ...` after each completion, and preview mode shows the full prompt-cache usage. DeepSeek automatically caches matching prompt prefixes server-side and reports `prompt_cache_hit_tokens` and `prompt_cache_miss_tokens`; the plugin calculates the hit rate from those response fields. Providers that do not report these fields show `N/A`.
+Set `OBSIDIAN_PLUGIN_DEST` to publish elsewhere; `npm run publish` republishes without rebuilding.
 
 ## Writing Modes
 
-A **writing mode** is a named preset. It owns the system prompt, prompt template, extra prompt, message roles, chain-of-thought settings, word/temperature limits, cursor context size, recall settings, context strategy and summary settings. Three modes ship built in, in Chinese or English (choose the language with **Default prompt language**):
+A mode is a named preset owning the system prompt, prompt template, extra prompt, message roles, CoT, word/temperature limits, recall settings, context strategy and summary settings. Three ship built in (Chinese or English via **Default prompt language**):
 
-| Mode | Context strategy | Intended use |
-| --- | --- | --- |
-| Note mode | `window` | General note completion with a fixed prefix/suffix window. |
-| Novel mode | `in-note` | Fiction continuation; replaces summarized paragraphs with their `[Summary]` blocks. |
-| Outline mode | `full` | Outlines and structural design over the whole preceding text. |
+| Mode | Context strategy |
+| --- | --- |
+| Note | `full` — the whole text before/after the cursor, untruncated |
+| Novel | `in-note` — summaries replace the summarized paragraphs |
+| Outline | `full` |
 
-Use the **Active mode** dropdown, the `Switch writing mode` command, or a per-vault shortcut to switch. Modes can be renamed, duplicated, added, deleted, and restored to their built-in defaults (in either language). Providers, the summary folder/scan limit, per-file summary switches and UI options stay global.
+Manage them under **Writing modes** (rename, duplicate, add, delete, restore defaults) or switch with the `Switch writing mode` command. Providers, the summary folder/scan limit, per-file summary switches and UI options are global.
 
-Templates support the placeholders `{title}`, `{summary}`, `{hooks}`, `{extra}`, `{prefix}`, `{suffix}`, `{max_words}` and `<<<CURSOR>>>`/`<<<光标>>>`.
+Templates support `{title}`, `{summary}`, `{hooks}`, `{extra}`, `{prefix}`, `{suffix}`, `{max_words}` and `<<<CURSOR>>>` / `<<<光标>>>`.
 
-## Global Context Hooks
+## Global Hooks
 
-Global hooks always inject other notes (never only the current one) into the prompt. Open **Manage global context hooks** (settings or command palette) to add notes, enable/disable each item, reorder them, and pick a per-item context strategy:
+Pin notes into every prompt via **Manage global context hooks** (settings or command palette): enable/disable, reorder, per-item strategy (`follow mode`, `full`, `in-note`) and an optional character cap. Hooks render as `[Global context: <title>]` at `{hooks}`; templates without it append them to `{summary}`. Notes already injected as hooks are excluded from adjacent-note recall.
 
-- `follow mode` — use the active writing mode's strategy.
-- `window` — beginning of the note, capped by the mode's prefix size (or the item's own cap).
-- `full` — the whole note.
-- `in-note` — replace `[Summary]` blocks with their summaries, then the unsummarized tail.
+## Summaries
 
-Each item also has an optional character cap (`0` = mode default). Hooks render as `[Global context: <note title>]` blocks at the `{hooks}` placeholder. Custom templates without `{hooks}` have the blocks appended to `{summary}` so nothing is silently dropped.
+- `Generate summary for current note` writes `summaries/summary-N.md` with `source:` frontmatter; the source note is never modified.
+- `Generate In-Note Summary` (`Mod+Shift+S`) inserts `> [Summary] …` after the selected paragraphs. In `in-note` mode, markers are detected anywhere in a line and the summarized text is replaced by the summaries.
+- Injection is configured per mode; the `Summary: ON/OFF` status-bar item toggles it for the session, and `Note summary: ON/OFF` excludes the current note.
 
-## Pre-send Prompt Preview
+## Prompt Preview
 
-Enable **Preview prompt before sending** to inspect the fully assembled request — system, CoT and prompt messages plus model/token settings — in a dialog with **Send** and **Cancel**. It works in both inline and preview modes, and **Copy JSON** copies the exact payload. The regular `Preview mode` still shows the prompt alongside the streaming completion.
+Enable **Preview prompt before sending** to confirm the assembled payload (all messages plus model/token settings) with Send / Cancel / Copy. **Warn when prompt exceeds 128k chars** shows a confirmation — with a "Don't warn me again" opt-out — before oversized requests.
 
 ## Commands
 
-- `Trigger LLM completion at cursor`
-- `Trigger LLM completion with an instruction` (default `Mod+Shift+Enter`)
-- `Switch writing mode`
-- `Manage global context hooks`
-- `Generate In-Note Summary` (default `Mod+Shift+S`)
-- `Generate summary for current note`
-- `Show summary status`
-- `Toggle summary injection (session)`
-- `Toggle current note summary injection`
-- `Dismiss current LLM suggestion`
-
-## Settings Groups
-
-- **Providers**: multiple OpenAI-compatible profiles (Base URL, API key, model) with model-list fetching; the active profile is the single source of truth for the connection.
-- **Writing modes**: active mode, rename/add/duplicate/delete, default prompt language, and restore-to-defaults.
-- **Generation limits** (per mode): word limit and temperature. The request timeout and the hard token cap live in Advanced.
-- **Prompt & context** (per mode): system prompt, prompt template, extra prompt, and cursor context size.
-- **Recall level** (per mode): how much context is collected (cursor window, summaries, linked notes).
-- **Summary recall**: the injection toggle, generation model/max words/max tokens/temperature/input chars, and in-note summary prompt are per mode; the summary folder, scan limit, per-file switches and status panel are global.
-- **Reasoning** (per mode): optional chain-of-thought toggle and template. The CoT trigger and message roles remain in data (and in exported prompt bundles) but are no longer shown in the UI.
-- **Context strategy** (per mode): `window`, `full` or `in-note` (see Writing Modes above), plus the in-note summary generation prompt.
-- **Global hooks**: master switch and the management dialog for notes pinned into every prompt.
-- **Display & shortcuts**: preview mode, pre-send prompt preview, streaming, thinking preview, and keyboard shortcuts.
-- **Advanced** (collapsed): prompt restore/export/import, request timeout, max tokens, custom HTTP headers, adjacent total chars, manual fallback summary, and the remaining summary generation limits.
-
-## Demo
-
-![Ghostwriter LLM demo](demo.gif)
+`Trigger LLM completion at cursor` · `Trigger LLM completion with an instruction` (`Mod+Shift+Enter`) · `Switch writing mode` · `Manage global context hooks` · `Generate In-Note Summary` (`Mod+Shift+S`) · `Generate summary for current note` · `Show summary status` · `Toggle summary injection (session)` · `Toggle current note summary injection` · `Dismiss current LLM suggestion`
 
 ## Development
 
 ```bash
 npm install
-npm run build
-npm run dev
+npm run dev     # esbuild watch
+npm run build   # typecheck + production bundle + publish
 ```
-
-`npm run build` runs the TypeScript check, creates a production bundle, and publishes the plugin files to the local test vault. `npm run dev` starts the esbuild watch process.
 
 ## License
 

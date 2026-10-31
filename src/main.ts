@@ -15,14 +15,17 @@ import { GhostwriterSettingTab } from "./settingsTab";
 import { CacheUsage, CompletionService, CompletionParams, formatCacheUsage, fetchModels } from "./completionService";
 import { clearGhostEffect, getGhost, ghostExtension, setGhostEffect, GhostState } from "./ghostText";
 import { ghostKeymap } from "./keymap";
-import { getPrefixSuffix, parseInNoteSummaries } from "./util";
+import { parseInNoteSummaries } from "./util";
 import { DEFAULT_NOVEL_SUMMARY_PROMPT_EN } from "./settings";
 import { GhostPopup } from "./popup";
 import { PreviewCard } from "./previewCard";
-import { PromptPreviewModal } from "./promptPreviewModal";
+import { PromptPreviewModal, PromptSizeWarningModal } from "./promptPreviewModal";
 import { GlobalHooksModal } from "./globalHooksModal";
 import { SummaryService, SummaryEntry } from "./summaryService";
 import { SummaryOpRecord, SummaryStatusModal } from "./summaryStatusModal";
+
+/** Warn before sending when the assembled prompt text exceeds 128k characters. */
+const PROMPT_SIZE_WARNING_CHARS = 128 * 1024;
 
 class InstructionModal extends Modal {
   private onSubmit: (instruction: string) => void;
@@ -518,27 +521,49 @@ export default class GhostwriterPlugin extends Plugin {
 
   /** Optionally show the assembled prompt for confirmation before the request is sent. */
   private startCompletionRun(params: CompletionParams, view: EditorView, pos: number, ac: AbortController): void {
-    if (this.settings.promptPreviewBeforeSend) {
-      let payload: ReturnType<CompletionService["buildPayload"]>;
-      try {
-        payload = this.service.buildPayload(params, this.settings.stream);
-      } catch (err) {
+    let payload: ReturnType<CompletionService["buildPayload"]>;
+    try {
+      payload = this.service.buildPayload(params, this.settings.stream);
+    } catch (err) {
+      this.popup.hide();
+      this.abortCurrent();
+      new Notice(`Cannot build prompt: ${(err as Error).message}`, 10000);
+      return;
+    }
+
+    const chars = payload.messages.reduce((sum, m) => sum + (m.content?.length ?? 0), 0);
+    const proceed = (): void => {
+      if (this.settings.promptPreviewBeforeSend) {
         this.popup.hide();
-        this.abortCurrent();
-        new Notice(`Cannot build prompt: ${(err as Error).message}`, 10000);
+        new PromptPreviewModal(this.app, payload, {
+          onSend: () => this.launchCompletion(params, view, pos, ac),
+          onCancel: () => {
+            this.popup.hide();
+            this.abortCurrent();
+          },
+        }).open();
         return;
       }
+      this.launchCompletion(params, view, pos, ac);
+    };
+
+    if (this.settings.warnOversizePrompt && chars > PROMPT_SIZE_WARNING_CHARS) {
       this.popup.hide();
-      new PromptPreviewModal(this.app, payload, {
-        onSend: () => this.launchCompletion(params, view, pos, ac),
+      new PromptSizeWarningModal(this.app, chars, PROMPT_SIZE_WARNING_CHARS, {
+        onContinue: proceed,
         onCancel: () => {
           this.popup.hide();
           this.abortCurrent();
         },
+        onDisableWarning: async () => {
+          this.settings.warnOversizePrompt = false;
+          await this.saveSettings();
+        },
       }).open();
       return;
     }
-    this.launchCompletion(params, view, pos, ac);
+
+    proceed();
   }
 
   private launchCompletion(params: CompletionParams, view: EditorView, pos: number, ac: AbortController): void {
@@ -572,8 +597,7 @@ export default class GhostwriterPlugin extends Plugin {
       } catch {
         continue;
       }
-      const mode = hook.contextMode === "follow" ? (s.contextMode ?? "window") : hook.contextMode;
-      const cap = hook.maxChars > 0 ? hook.maxChars : Math.max(0, s.prefixChars);
+      const mode = hook.contextMode === "follow" ? (s.contextMode ?? "full") : hook.contextMode;
       let content = raw;
       if (mode === "in-note") {
         const parsed = parseInNoteSummaries(raw);
@@ -584,7 +608,7 @@ export default class GhostwriterPlugin extends Plugin {
         }
       }
       content = content.trim();
-      if (mode !== "full" && cap > 0 && content.length > cap) content = content.slice(0, cap);
+      if (hook.maxChars > 0 && content.length > hook.maxChars) content = content.slice(0, hook.maxChars);
       if (!content) continue;
       blocks.push(`[Global context: ${file.basename}]\n${content}`);
     }
@@ -597,6 +621,7 @@ export default class GhostwriterPlugin extends Plugin {
     if (level === 0) return "";
     const file = this.app.workspace.getActiveFile();
     const parts: string[] = [];
+    const hookPaths = this.activeHookPaths();
 
     if (level < 3) {
       if (file instanceof TFile && file.path.toLowerCase().endsWith(".md")) {
@@ -624,8 +649,9 @@ export default class GhostwriterPlugin extends Plugin {
       }
       others = others.filter(
         (e) =>
-          !(file instanceof TFile) ||
-          (e.path !== file.path && e.summaryFilePath !== file.path)
+          !hookPaths.has(e.path) &&
+          (!(file instanceof TFile) ||
+            (e.path !== file.path && e.summaryFilePath !== file.path))
       );
       others.sort((a, b) => a.title.localeCompare(b.title));
       for (const e of others) {
@@ -645,7 +671,7 @@ export default class GhostwriterPlugin extends Plugin {
       const depth = level >= 3 ? Number.MAX_SAFE_INTEGER : Math.max(1, Math.floor(s.adjacentDepth || 1));
       const maxNotes = Math.max(1, Math.floor(s.adjacentMaxNotes || 20));
       try {
-        const blocks = await this.adjacentNoteBlocks(file, depth, maxNotes, signal);
+        const blocks = await this.adjacentNoteBlocks(file, depth, maxNotes, signal, hookPaths);
         parts.push(...blocks);
       } catch (err) {
         console.warn("adjacent notes recall failed", err);
@@ -661,6 +687,14 @@ export default class GhostwriterPlugin extends Plugin {
     return Math.min(3, Math.max(0, Number.isFinite(lvl) ? lvl : 1));
   }
 
+  /** Paths of enabled hooks; used to avoid injecting the same note twice via adjacent notes/summaries. */
+  private activeHookPaths(): Set<string> {
+    const s = this.settings;
+    return new Set(
+      s.globalHooksEnabled ? s.globalHooks.filter((h) => h.enabled).map((h) => h.path) : []
+    );
+  }
+
   /**
    * Build the cursor context according to the active mode's context strategy:
    * - "in-note": in-note summary blocks (`[Summary]` / `[摘要]` markers anywhere
@@ -668,45 +702,30 @@ export default class GhostwriterPlugin extends Plugin {
    *   are injected immediately before the unsummarized tail (inside {prefix}).
    *   With no markers it falls back to the full preceding text.
    * - "full": the whole text before the cursor.
-   * - "window": the legacy prefix/suffix window.
+   *
+   * Neither prefix nor suffix is truncated; oversized prompts are warned about
+   * before sending instead.
    */
   private buildContext(editor: Editor): { prefix: string; suffix: string } {
     const cursor = editor.getCursor("head");
     const lastLineNum = editor.lastLine();
     const docEnd = { line: lastLineNum, ch: editor.getLine(lastLineNum).length };
-    const suffix = editor.getRange(cursor, docEnd).slice(0, Math.max(0, this.settings.suffixChars));
+    const suffix = editor.getRange(cursor, docEnd);
 
     const fullPrefix = editor.getRange({ line: 0, ch: 0 }, cursor);
-    const mode = this.settings.contextMode ?? "window";
+    const mode = this.settings.contextMode ?? "full";
 
     if (mode === "in-note") {
       const parsed = parseInNoteSummaries(fullPrefix);
       if (parsed.hasAny) {
-        const cap = Math.max(0, this.settings.prefixChars);
-        let tail = parsed.tail.replace(/^[\s\r\n]+/, "").replace(/[\s\r\n]+$/, "");
-        if (cap > 0 && tail.length > cap) tail = tail.slice(tail.length - cap);
+        const tail = parsed.tail.replace(/^[\s\r\n]+/, "").replace(/[\s\r\n]+$/, "");
         const block = parsed.summaries.map((s, idx) => `[Summary ${idx + 1}] ${s}`).join("\n");
         const prefix = tail ? `${block}\n\n${tail}` : block;
         return { prefix, suffix };
       }
-      return { prefix: fullPrefix, suffix };
     }
 
-    if (mode === "full") {
-      return { prefix: fullPrefix, suffix };
-    }
-
-    const windowChars = this.contextWindowChars();
-    const { prefix } = getPrefixSuffix(editor, windowChars.prefix, windowChars.suffix);
-    return { prefix, suffix };
-  }
-
-  /** Cursor context window; level 3 recalls the full note instead of the truncated window. */
-  private contextWindowChars(): { prefix: number; suffix: number } {
-    if (this.recallLevel() >= 3) {
-      return { prefix: Number.MAX_SAFE_INTEGER, suffix: Number.MAX_SAFE_INTEGER };
-    }
-    return { prefix: this.settings.prefixChars, suffix: this.settings.suffixChars };
+    return { prefix: fullPrefix, suffix };
   }
 
   /** A summary is skipped when either its source-note path or its summary-file path is in the disable list. */
@@ -723,7 +742,8 @@ export default class GhostwriterPlugin extends Plugin {
     current: TFile,
     depth: number,
     maxNotes: number,
-    signal: AbortSignal
+    signal: AbortSignal,
+    exclude?: Set<string>
   ): Promise<string[]> {
     const resolved = (this.app.metadataCache.resolvedLinks ?? {}) as Record<string, Record<string, number>>;
     const outgoing = (p: string): string[] => Object.keys(resolved[p] ?? {});
@@ -758,6 +778,7 @@ export default class GhostwriterPlugin extends Plugin {
     for (const path of sorted) {
       if (blocks.length >= maxNotes || signal.aborted || remaining <= 0) break;
       if (path === current.path || !path.toLowerCase().endsWith(".md")) continue;
+      if (exclude?.has(path)) continue;
       if (folder && path.startsWith(`${folder}/`)) continue;
       const f = this.app.vault.getAbstractFileByPath(path);
       if (!(f instanceof TFile)) continue;

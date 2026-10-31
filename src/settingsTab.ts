@@ -347,36 +347,6 @@ export class GhostwriterSettingTab extends PluginSettingTab {
           });
       });
 
-    new Setting(containerEl)
-      .setName("Prefix chars")
-      .setDesc("Characters before the cursor sent as context.")
-      .addText((text) =>
-        text
-          .setValue(String(this.plugin.settings.prefixChars))
-          .onChange(async (value) => {
-            const n = Number(value);
-            if (Number.isFinite(n) && n >= 0) {
-              this.plugin.settings.prefixChars = Math.floor(n);
-              await this.plugin.saveSettings();
-            }
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Suffix chars")
-      .setDesc("Characters after the cursor sent as context.")
-      .addText((text) =>
-        text
-          .setValue(String(this.plugin.settings.suffixChars))
-          .onChange(async (value) => {
-            const n = Number(value);
-            if (Number.isFinite(n) && n >= 0) {
-              this.plugin.settings.suffixChars = Math.floor(n);
-              await this.plugin.saveSettings();
-            }
-          })
-      );
-
     section("Recall level", "How much context is collected into the completion prompt for the active writing mode.");
     new Setting(containerEl)
       .setName("Recall level")
@@ -582,14 +552,13 @@ export class GhostwriterSettingTab extends PluginSettingTab {
     section("Context strategy", "How the text before the cursor is assembled for the active mode.");
     new Setting(containerEl)
       .setName("Context strategy")
-      .setDesc("window = fixed prefix/suffix window; full = the whole preceding text; in-note = detect [Summary]/[摘要] blocks and send the summaries immediately before the unsummarized text (falls back to the full text when none are found).")
+      .setDesc("full = the whole preceding text (and whole text after the cursor), with no truncation; in-note = detect [Summary]/[摘要] blocks and send the summaries immediately before the unsummarized text (falls back to the full text when none are found).")
       .addDropdown((dd) => {
         dd.addOptions({
-          window: "window · prefix/suffix window",
           full: "full · whole preceding text",
           "in-note": "in-note · summaries + unsummarized tail",
         });
-        dd.setValue(this.plugin.settings.contextMode ?? "window");
+        dd.setValue(this.plugin.settings.contextMode ?? "full");
         dd.onChange(async (value) => {
           this.plugin.settings.contextMode = value as ContextMode;
           await this.plugin.saveSettings();
@@ -650,6 +619,18 @@ export class GhostwriterSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.promptPreviewBeforeSend)
           .onChange(async (value) => {
             this.plugin.settings.promptPreviewBeforeSend = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Warn when prompt exceeds 128k chars")
+      .setDesc("Show a confirmation dialog when the assembled prompt text is above ~128,000 characters, so a too-large request does not fail silently. The dialog also offers “Don't warn me again”.")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.warnOversizePrompt)
+          .onChange(async (value) => {
+            this.plugin.settings.warnOversizePrompt = value;
             await this.plugin.saveSettings();
           })
       );

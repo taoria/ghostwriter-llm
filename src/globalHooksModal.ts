@@ -118,7 +118,6 @@ export class GlobalHooksModal extends Modal {
         .addDropdown((dd) => {
           dd.addOptions({
             follow: "follow mode",
-            window: "window",
             full: "full",
             "in-note": "in-note",
           });
@@ -131,7 +130,7 @@ export class GlobalHooksModal extends Modal {
         .addText((text) => {
           text.inputEl.type = "number";
           text.inputEl.min = "0";
-          text.setPlaceholder("0 = mode default");
+          text.setPlaceholder("0 = no cap");
           text.setValue(String(hook.maxChars));
           text.onChange(async (value) => {
             const n = Math.floor(Number(value));

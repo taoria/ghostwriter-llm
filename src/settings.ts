@@ -2,13 +2,12 @@ export type MessageRole = "user" | "assistant" | "system";
 
 /**
  * How the text before the cursor is assembled:
- * - "window": legacy fixed prefix/suffix window (default for notes).
- * - "full": the whole text before the cursor (outline / structure design).
+ * - "full": the whole text before the cursor (the default; no truncation).
  * - "in-note": detect `[Summary]` / `[摘要]` blocks; the summarized text is
- *   replaced by the summaries and sent immediately before the unsummarized tail
- *   (novels). With no markers it falls back to the full preceding text.
+ *   replaced by the summaries and sent immediately before the unsummarized tail.
+ *   With no markers it falls back to the full preceding text.
  */
-export type ContextMode = "window" | "full" | "in-note";
+export type ContextMode = "full" | "in-note";
 
 export interface ProviderProfile {
   id: string;
@@ -29,7 +28,7 @@ export interface HookItem {
   path: string;
   enabled: boolean;
   contextMode: "follow" | ContextMode;
-  /** Character cap for this note; 0 = mode default (prefixChars, or the whole note in "full"). */
+  /** Character cap for this note; 0 = no cap (the whole rendered note is sent). */
   maxChars: number;
 }
 
@@ -51,8 +50,6 @@ export interface ModeProfile {
   cotTriggerRole: MessageRole;
   maxWords: number;
   temperature: number;
-  prefixChars: number;
-  suffixChars: number;
   recallLevel: number;
   adjacentDepth: number;
   adjacentMaxNotes: number;
@@ -81,8 +78,6 @@ export const MODE_KEYS = [
   "cotTriggerRole",
   "maxWords",
   "temperature",
-  "prefixChars",
-  "suffixChars",
   "recallLevel",
   "adjacentDepth",
   "adjacentMaxNotes",
@@ -116,8 +111,6 @@ export interface GhostwriterSettings {
   systemPrompt: string;
   promptTemplate: string;
   extraPrompt: string;
-  prefixChars: number;
-  suffixChars: number;
   summary: string;
   summaryEnabled: boolean;
   summaryFolder: string;
@@ -145,6 +138,8 @@ export interface GhostwriterSettings {
   peekCoT: boolean;
   /** Show the fully assembled prompt in a confirmation dialog before sending the request. */
   promptPreviewBeforeSend: boolean;
+  /** Warn (with a "don't remind again" option) when the assembled prompt exceeds the size threshold. */
+  warnOversizePrompt: boolean;
   /** Master switch for notes pinned into every prompt. */
   globalHooksEnabled: boolean;
   globalHooks: HookItem[];
@@ -432,8 +427,6 @@ export function defaultModeProfiles(lang: PromptLanguage): ModeProfile[] {
       cotTriggerRole: "system",
       maxWords: 100,
       temperature: 0.7,
-      prefixChars: 2000,
-      suffixChars: 1000,
       recallLevel: 1,
       adjacentDepth: 1,
       adjacentMaxNotes: 20,
@@ -445,7 +438,7 @@ export function defaultModeProfiles(lang: PromptLanguage): ModeProfile[] {
       summaryMaxWords: 100,
       summaryTemperature: 0.3,
       summaryInputChars: 8000,
-      contextMode: "window",
+      contextMode: "full",
       inNoteSummaryPrompt: zh ? DEFAULT_NOVEL_SUMMARY_PROMPT : DEFAULT_NOVEL_SUMMARY_PROMPT_EN,
     },
     {
@@ -462,8 +455,6 @@ export function defaultModeProfiles(lang: PromptLanguage): ModeProfile[] {
       cotTriggerRole: "system",
       maxWords: 256,
       temperature: 0.8,
-      prefixChars: 40000,
-      suffixChars: 40000,
       recallLevel: 2,
       adjacentDepth: 1,
       adjacentMaxNotes: 20,
@@ -492,8 +483,6 @@ export function defaultModeProfiles(lang: PromptLanguage): ModeProfile[] {
       cotTriggerRole: "system",
       maxWords: 300,
       temperature: 0.6,
-      prefixChars: 2000,
-      suffixChars: 2000,
       recallLevel: 0,
       adjacentDepth: 1,
       adjacentMaxNotes: 20,
@@ -568,8 +557,6 @@ export const DEFAULT_SETTINGS: GhostwriterSettings = {
   systemPrompt: DEFAULT_SYSTEM_PROMPT,
   promptTemplate: DEFAULT_PROMPT_TEMPLATE,
   extraPrompt: "",
-  prefixChars: 2000,
-  suffixChars: 1000,
   summary: "",
   summaryEnabled: true,
   summaryFolder: "summaries",
@@ -595,9 +582,10 @@ export const DEFAULT_SETTINGS: GhostwriterSettings = {
   previewMode: false,
   peekCoT: false,
   promptPreviewBeforeSend: false,
+  warnOversizePrompt: true,
   globalHooksEnabled: false,
   globalHooks: [],
-  contextMode: "window",
+  contextMode: "full",
   inNoteSummaryPrompt: DEFAULT_NOVEL_SUMMARY_PROMPT_EN,
   acceptKey: "Shift+Insert",
   dismissKey: "Escape",
@@ -649,6 +637,8 @@ const LEGACY_SETTING_KEYS = [
   "summaryDisabledPaths",
   "novelMode",
   "novelSummaryPrompt",
+  "prefixChars",
+  "suffixChars",
 ];
 
 const asStrings = (arr: unknown): string[] =>
@@ -662,7 +652,7 @@ function normalizeHooks(raw: unknown): HookItem[] {
     const r = item as Record<string, unknown>;
     const path = typeof r.path === "string" ? r.path.trim() : "";
     if (!path) continue;
-    const mode = r.contextMode === "window" || r.contextMode === "full" || r.contextMode === "in-note"
+    const mode = r.contextMode === "full" || r.contextMode === "in-note"
       ? r.contextMode
       : "follow";
     const cap = Math.floor(Number(r.maxChars ?? 0));
@@ -686,7 +676,7 @@ function detectLanguage(data: Record<string, unknown>): PromptLanguage {
 }
 
 function coerceContextMode(v: unknown): ContextMode | undefined {
-  return v === "window" || v === "full" || v === "in-note" ? v : undefined;
+  return v === "full" || v === "in-note" ? v : undefined;
 }
 
 const ROLES: MessageRole[] = ["user", "assistant", "system"];
@@ -702,10 +692,6 @@ function coerceModeNumbers(m: ModeProfile): void {
   m.maxWords = Number.isFinite(mw) && mw > 0 ? mw : 100;
   const t = Number(m.temperature ?? 0.7);
   m.temperature = Number.isFinite(t) && t >= 0 && t <= 2 ? t : 0.7;
-  const pc = Math.floor(Number(m.prefixChars ?? 2000));
-  m.prefixChars = Number.isFinite(pc) && pc >= 0 ? pc : 2000;
-  const sc = Math.floor(Number(m.suffixChars ?? 1000));
-  m.suffixChars = Number.isFinite(sc) && sc >= 0 ? sc : 1000;
   if (typeof m.summaryModel !== "string") m.summaryModel = "gpt-4o-mini";
   const smt = Math.floor(Number(m.summaryMaxTokens ?? 4096));
   m.summaryMaxTokens = Number.isFinite(smt) && smt > 0 ? smt : 4096;
@@ -718,7 +704,7 @@ function coerceModeNumbers(m: ModeProfile): void {
   if (!ROLES.includes(m.promptTemplateRole)) m.promptTemplateRole = "user";
   if (!ROLES.includes(m.cotTemplateRole)) m.cotTemplateRole = "user";
   if (!ROLES.includes(m.cotTriggerRole)) m.cotTriggerRole = "system";
-  m.contextMode = coerceContextMode(m.contextMode) ?? "window";
+  m.contextMode = coerceContextMode(m.contextMode) ?? "full";
   if (typeof m.inNoteSummaryPrompt !== "string") m.inNoteSummaryPrompt = DEFAULT_NOVEL_SUMMARY_PROMPT_EN;
 }
 
@@ -764,7 +750,7 @@ function normalizeModes(
     for (const k of MODE_KEYS) {
       if (data[k] !== undefined) (target as unknown as Record<string, unknown>)[k] = s[k];
     }
-    target.contextMode = coerceContextMode(data.contextMode) ?? (legacyNovel ? "in-note" : "window");
+    target.contextMode = coerceContextMode(data.contextMode) ?? (legacyNovel ? "in-note" : "full");
     const legacySummaryPrompt =
       typeof data.novelSummaryPrompt === "string" && data.novelSummaryPrompt.trim()
         ? data.novelSummaryPrompt
@@ -826,6 +812,7 @@ export function migrateSettings(raw: unknown): GhostwriterSettings {
   s.globalHooksEnabled = data.globalHooksEnabled === true;
   s.globalHooks = normalizeHooks(s.globalHooks);
   s.promptPreviewBeforeSend = data.promptPreviewBeforeSend === true;
+  s.warnOversizePrompt = data.warnOversizePrompt !== false;
 
   const tSec = Math.floor(Number(s.requestTimeoutSec ?? 120));
   s.requestTimeoutSec = Math.max(5, Number.isFinite(tSec) ? tSec : 120);

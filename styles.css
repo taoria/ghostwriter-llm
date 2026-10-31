@@ -664,3 +664,21 @@ details.ghostwriter-settings-advanced > .setting-item-description {
 .ghostwriter-hook-row .setting-item-control {
   flex-wrap: wrap;
 }
+
+/* ---- Prompt size warning ---- */
+.modal.ghostwriter-prompt-size-warning {
+  width: min(560px, 92vw);
+}
+
+.ghostwriter-prompt-size-options {
+  margin: 12px 0;
+}
+
+.ghostwriter-prompt-size-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+  cursor: pointer;
+}
