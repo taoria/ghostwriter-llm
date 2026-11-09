@@ -682,3 +682,205 @@ details.ghostwriter-settings-advanced > .setting-item-description {
   color: var(--text-muted);
   cursor: pointer;
 }
+
+/* ---- Global hooks manager: per-row cap label ---- */
+.ghostwriter-hook-cap-label {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  margin-right: 4px;
+  white-space: nowrap;
+}
+
+.modal.ghostwriter-hooks-modal input[type="number"] {
+  width: 80px;
+}
+
+.ghostwriter-hooks-legend {
+  margin: 4px 0 8px;
+}
+
+/* ---- Background sessions (right sidebar) ---- */
+.ghostwriter-sessions-view {
+  padding: 8px 10px 16px;
+}
+
+.ghostwriter-sessions-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.ghostwriter-sessions-title {
+  font-weight: 600;
+  font-size: var(--font-ui-medium);
+  flex: 1 1 auto;
+}
+
+.ghostwriter-sessions-running {
+  font-size: var(--font-ui-smaller);
+  color: var(--interactive-accent);
+  background: var(--background-modifier-hover);
+  border-radius: 10px;
+  padding: 1px 8px;
+}
+
+.ghostwriter-sessions-clear {
+  font-size: var(--font-ui-smaller);
+  padding: 2px 8px;
+}
+
+.ghostwriter-sessions-empty {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  line-height: 1.5;
+}
+
+.ghostwriter-sessions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ghostwriter-session {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-secondary);
+  padding: 8px 10px;
+}
+
+.ghostwriter-session.is-running,
+.ghostwriter-session.is-preparing {
+  border-color: var(--interactive-accent);
+}
+
+.ghostwriter-session.is-error {
+  border-color: var(--text-error);
+}
+
+.ghostwriter-session-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ghostwriter-session-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--text-faint);
+}
+
+.ghostwriter-session.is-running .ghostwriter-session-dot,
+.ghostwriter-session.is-preparing .ghostwriter-session-dot {
+  background: var(--interactive-accent);
+  animation: ghostwriter-session-pulse 1.2s ease-in-out infinite;
+}
+
+.ghostwriter-session.is-done .ghostwriter-session-dot {
+  background: var(--color-green, var(--text-success));
+}
+
+.ghostwriter-session.is-error .ghostwriter-session-dot {
+  background: var(--text-error);
+}
+
+.ghostwriter-session-name {
+  font-weight: 600;
+  font-size: var(--font-ui-small);
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ghostwriter-session-meta {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.ghostwriter-session-path {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+  margin: 2px 0 6px 14px;
+  word-break: break-all;
+}
+
+.ghostwriter-session-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.ghostwriter-session-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: var(--font-ui-smaller);
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: var(--background-modifier-hover);
+  border: 1px solid var(--background-modifier-border);
+  color: var(--text-normal);
+  cursor: pointer;
+}
+
+.ghostwriter-session-btn:hover {
+  background: var(--background-modifier-border);
+}
+
+.ghostwriter-session-btn svg {
+  width: 12px;
+  height: 12px;
+}
+
+.ghostwriter-session-btn.mod-cta {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+}
+
+.ghostwriter-session-completion {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: var(--font-ui-small);
+  line-height: 1.45;
+  max-height: 220px;
+  overflow-y: auto;
+  border-top: 1px dashed var(--background-modifier-border);
+  padding-top: 6px;
+}
+
+.ghostwriter-session.is-error .ghostwriter-session-completion {
+  color: var(--text-error);
+}
+
+.ghostwriter-session-details {
+  margin-top: 6px;
+}
+
+.ghostwriter-session-details summary {
+  cursor: pointer;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+
+.ghostwriter-session-pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: var(--font-ui-smaller);
+  max-height: 220px;
+  overflow-y: auto;
+  margin: 4px 0 0;
+  padding: 6px;
+  border-radius: 4px;
+  background: var(--background-primary);
+}
+
+@keyframes ghostwriter-session-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}

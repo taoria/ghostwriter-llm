@@ -143,6 +143,8 @@ export interface GhostwriterSettings {
   /** Master switch for notes pinned into every prompt. */
   globalHooksEnabled: boolean;
   globalHooks: HookItem[];
+  /** Keep completions running when switching notes and manage them in the right sidebar. */
+  backgroundMode: boolean;
   contextMode: ContextMode;
   inNoteSummaryPrompt: string;
   acceptKey: string;
@@ -585,6 +587,7 @@ export const DEFAULT_SETTINGS: GhostwriterSettings = {
   warnOversizePrompt: true,
   globalHooksEnabled: false,
   globalHooks: [],
+  backgroundMode: false,
   contextMode: "full",
   inNoteSummaryPrompt: DEFAULT_NOVEL_SUMMARY_PROMPT_EN,
   acceptKey: "Shift+Insert",
@@ -811,6 +814,7 @@ export function migrateSettings(raw: unknown): GhostwriterSettings {
 
   s.globalHooksEnabled = data.globalHooksEnabled === true;
   s.globalHooks = normalizeHooks(s.globalHooks);
+  s.backgroundMode = data.backgroundMode === true;
   s.promptPreviewBeforeSend = data.promptPreviewBeforeSend === true;
   s.warnOversizePrompt = data.warnOversizePrompt !== false;
 

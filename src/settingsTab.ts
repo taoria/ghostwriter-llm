@@ -636,6 +636,23 @@ export class GhostwriterSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Background mode")
+      .setDesc("Keep completions running when you switch notes. The right-sidebar Sessions view previews and manages every session (cancel / accept / retry / remove). When off, switching notes cancels the current suggestion, as before.")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.backgroundMode)
+          .onChange(async (value) => {
+            this.plugin.settings.backgroundMode = value;
+            await this.plugin.saveSettings();
+          })
+      )
+      .addButton((btn) => {
+        btn.setButtonText("Open sessions").onClick(() => {
+          void this.plugin.activateSessionsView();
+        });
+      });
+
+    new Setting(containerEl)
       .setName("Peek CoT (inline)")
       .setDesc("In inline mode, show the model's thinking stream in the floating popup near the cursor while the completion renders as ghost text. Click the 'Thinking' header to collapse/expand.")
       .addToggle((toggle) =>

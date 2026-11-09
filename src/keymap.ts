@@ -5,8 +5,8 @@ import { getGhost } from "./ghostText";
 export interface GhostKeyHandlers {
   onAccept: (view: EditorView) => void;
   onDismiss: (view: EditorView) => void;
-  /** True while a completion is generating; allows dismissal keys to cancel even without ghost text. */
-  isBusy?: () => boolean;
+  /** True while a completion is generating for this view; allows dismissal keys to cancel even without ghost text. */
+  isBusy?: (view: EditorView) => boolean;
 }
 
 const KEY_ALIASES: Record<string, string> = {
@@ -112,7 +112,7 @@ export function ghostKeymap(
       run: (view: EditorView): boolean => {
         const dismissKeys = parseKeys(getKeys().dismiss);
         if (!dismissKeys.includes(combo)) return false;
-        if (!getGhost(view.state) && !(handlers.isBusy?.() ?? false)) return false;
+        if (!getGhost(view.state) && !(handlers.isBusy?.(view) ?? false)) return false;
         handlers.onDismiss(view);
         return true;
       },
@@ -122,7 +122,7 @@ export function ghostKeymap(
   const domHandler = EditorView.domEventHandlers({
     keydown: (event: KeyboardEvent, view: EditorView) => {
       const ghost = getGhost(view.state);
-      const busy = handlers.isBusy?.() ?? false;
+      const busy = handlers.isBusy?.(view) ?? false;
       if (!ghost && !busy) return false;
       const acceptKeys = parseKeys(getKeys().accept);
       const dismissKeys = parseKeys(getKeys().dismiss);

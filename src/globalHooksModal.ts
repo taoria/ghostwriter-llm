@@ -90,6 +90,13 @@ export class GlobalHooksModal extends Modal {
           });
       });
 
+    if (s.globalHooks.length) {
+      contentEl.createEl("p", {
+        cls: "setting-item-description ghostwriter-hooks-legend",
+        text: "Each row: enable · context strategy · max chars (0 = no limit) · move up/down · remove. Hooks are injected in list order.",
+      });
+    }
+
     if (!s.globalHooks.length) {
       contentEl.createEl("p", {
         text: "No hooks yet. Add a note to pin it into every prompt.",
@@ -130,7 +137,13 @@ export class GlobalHooksModal extends Modal {
         .addText((text) => {
           text.inputEl.type = "number";
           text.inputEl.min = "0";
-          text.setPlaceholder("0 = no cap");
+          text.inputEl.title = "Max characters for this note (0 = no limit)";
+          text.inputEl.setAttribute("aria-label", "Max chars (0 = no limit)");
+          const label = document.createElement("span");
+          label.className = "ghostwriter-hook-cap-label";
+          label.textContent = "max chars";
+          text.inputEl.insertAdjacentElement("beforebegin", label);
+          text.setPlaceholder("0 = no limit");
           text.setValue(String(hook.maxChars));
           text.onChange(async (value) => {
             const n = Math.floor(Number(value));

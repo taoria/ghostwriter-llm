@@ -21,6 +21,8 @@ import { GhostPopup } from "./popup";
 import { PreviewCard } from "./previewCard";
 import { PromptPreviewModal, PromptSizeWarningModal } from "./promptPreviewModal";
 import { GlobalHooksModal } from "./globalHooksModal";
+import { CompletionSession, makeSessionId } from "./sessions";
+import { SessionsView, VIEW_TYPE_SESSIONS } from "./sessionsView";
 import { SummaryService, SummaryEntry } from "./summaryService";
 import { SummaryOpRecord, SummaryStatusModal } from "./summaryStatusModal";
 
@@ -106,12 +108,12 @@ export default class GhostwriterPlugin extends Plugin {
   summaryService!: SummaryService;
   private popup!: GhostPopup;
   private preview: PreviewCard | null = null;
-  private currentAbort: AbortController | null = null;
-  private currentParams: CompletionParams | null = null;
-  private currentView: EditorView | null = null;
-  private currentEditor: Editor | null = null;
-  private currentPos: number = 0;
-  private generating: boolean = false;
+  private summaryAbort: AbortController | null = null;
+  /** All completion sessions, newest first (running or finished). */
+  private sessions: CompletionSession[] = [];
+  /** Most recently started/active session. */
+  private activeSessionId: string | null = null;
+  private sessionsRefreshTimer: number | null = null;
   private sessionSummaryOn: boolean = true;
   private statusBarEl: HTMLElement | null = null;
   private currentSummaryStatusBarEl: HTMLElement | null = null;
@@ -132,14 +134,28 @@ export default class GhostwriterPlugin extends Plugin {
       onDismiss: () => this.dismiss(),
     });
 
+    this.registerView(VIEW_TYPE_SESSIONS, (leaf) => new SessionsView(leaf, this));
+
     this.registerEditorExtension([ghostExtension, ghostKeymap({
-      onAccept: () => this.accept(),
-      onDismiss: () => this.dismiss(),
-      isBusy: () => this.generating,
+      onAccept: (view) => this.accept(view),
+      onDismiss: (view) => this.dismiss(view),
+      isBusy: (view) => this.hasRunningSessionForView(view),
     }, () => ({
       accept: this.settings.acceptKey,
       dismiss: this.settings.dismissKey,
     }))]);
+
+    this.addRibbonIcon("sparkles", "Ghostwriter sessions", () => {
+      void this.activateSessionsView();
+    });
+
+    this.addCommand({
+      id: "open-background-sessions",
+      name: "Open background sessions",
+      callback: () => {
+        void this.activateSessionsView();
+      },
+    });
 
     this.addCommand({
       id: "trigger-llm-completion",
@@ -235,7 +251,7 @@ export default class GhostwriterPlugin extends Plugin {
         }
         new Notice("Generating summary…");
         const ac = new AbortController();
-        this.currentAbort = ac;
+        this.summaryAbort = ac;
         const rec = this.beginSummaryOp("note-summary", f.path);
         try {
           const summary = await this.summaryService.regenerate(f, ac.signal);
@@ -255,15 +271,28 @@ export default class GhostwriterPlugin extends Plugin {
           this.finishSummaryOp(rec, "failed", (err as Error).message);
           new Notice(`Summary generation failed: ${(err as Error).message}`, 10000);
         } finally {
-          this.currentAbort = null;
+          this.summaryAbort = null;
         }
       },
     });
 
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
-        this.dismiss();
         this.updateStatusBar();
+        if (this.settings.backgroundMode) {
+          // Sessions keep running in the background; hide the floating popup of the previous view.
+          this.popup.hide();
+          // Returning to a note whose completion finished while away: re-show its action bar.
+          const v = this.activeEditorView();
+          if (v && getGhost(v.state)) {
+            const done = this.sessions.find((s) => s.view === v && s.status === "done");
+            if (done) this.popup.showActions(v, done.anchorOffset);
+          }
+        } else {
+          // Legacy behavior: switching notes cancels the current suggestion.
+          this.dismiss();
+        }
+        this.scheduleSessionsRefresh();
       })
     );
 
@@ -361,7 +390,9 @@ export default class GhostwriterPlugin extends Plugin {
   onunload() {
     this.popup?.destroy();
     this.preview?.close();
-    this.abortCurrent();
+    this.summaryAbort?.abort();
+    for (const session of this.sessions) session.abort.abort();
+    if (this.sessionsRefreshTimer !== null) window.clearTimeout(this.sessionsRefreshTimer);
   }
 
   async loadSettings() {
@@ -440,20 +471,122 @@ export default class GhostwriterPlugin extends Plugin {
     return cm ?? null;
   }
 
-  private abortCurrent() {
-    if (this.currentAbort) {
-      this.currentAbort.abort();
-      this.currentAbort = null;
+  private findSession(id: string): CompletionSession | undefined {
+    return this.sessions.find((s) => s.id === id);
+  }
+
+  getSessions(): CompletionSession[] {
+    return this.sessions;
+  }
+
+  private runningSessionForView(view: EditorView): CompletionSession | undefined {
+    return this.sessions.find(
+      (s) => s.view === view && (s.status === "running" || s.status === "preparing")
+    );
+  }
+
+  hasRunningSessionForView(view: EditorView): boolean {
+    return !!this.runningSessionForView(view);
+  }
+
+  private newestRunningSession(): CompletionSession | undefined {
+    return this.sessions.find((s) => s.status === "running" || s.status === "preparing");
+  }
+
+  cancelSession(id: string): void {
+    const s = this.findSession(id);
+    if (!s) return;
+    if (s.status === "running" || s.status === "preparing") {
+      s.abort.abort();
+      s.status = "cancelled";
+      s.updatedAt = Date.now();
+      if (s.view) this.clearGhostInView(s.view);
+      if (this.activeSessionId === id) this.popup.hide();
     }
-    this.generating = false;
+    this.scheduleSessionsRefresh();
+  }
+
+  removeSession(id: string): void {
+    const idx = this.sessions.findIndex((s) => s.id === id);
+    if (idx < 0) return;
+    const s = this.sessions[idx];
+    s.abort.abort();
+    if (s.view) this.clearGhostInView(s.view);
+    this.sessions.splice(idx, 1);
+    if (this.activeSessionId === id) this.activeSessionId = this.sessions[0]?.id ?? null;
+    this.scheduleSessionsRefresh();
+  }
+
+  clearFinishedSessions(): void {
+    for (const session of [...this.sessions]) {
+      if (session.status !== "running" && session.status !== "preparing") {
+        this.removeSession(session.id);
+      }
+    }
+  }
+
+  private scheduleSessionsRefresh(): void {
+    if (this.sessionsRefreshTimer !== null) return;
+    this.sessionsRefreshTimer = window.setTimeout(() => {
+      this.sessionsRefreshTimer = null;
+      for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_SESSIONS)) {
+        if (leaf.view instanceof SessionsView) leaf.view.render();
+      }
+    }, 150);
+  }
+
+  async activateSessionsView(reveal = true): Promise<void> {
+    const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_SESSIONS);
+    if (existing.length) {
+      const leaf = existing[0];
+      if (reveal) this.app.workspace.revealLeaf(leaf);
+      if (leaf.view instanceof SessionsView) leaf.view.render();
+      return;
+    }
+    const leaf = this.app.workspace.getRightLeaf(false);
+    if (!leaf) return;
+    await leaf.setViewState({ type: VIEW_TYPE_SESSIONS, active: reveal });
+    if (reveal) this.app.workspace.revealLeaf(leaf);
+    if (leaf.view instanceof SessionsView) leaf.view.render();
   }
 
   private clearGhostInView(view: EditorView) {
-    view.dispatch({ effects: clearGhostEffect.of(null) });
+    try {
+      view.dispatch({ effects: clearGhostEffect.of(null) });
+    } catch {
+      // The view was destroyed; nothing to clear.
+    }
   }
 
   private setGhostInView(view: EditorView, state: GhostState) {
-    view.dispatch({ effects: setGhostEffect.of(state) });
+    try {
+      view.dispatch({ effects: setGhostEffect.of(state) });
+    } catch {
+      // The view was destroyed; the session keeps running for the sidebar.
+    }
+  }
+
+  private canRenderGhost(view: EditorView | null): view is EditorView {
+    if (!view) return false;
+    try {
+      return view.dom?.isConnected !== false;
+    } catch {
+      return false;
+    }
+  }
+
+  private isViewActive(view: EditorView): boolean {
+    const ae = this.app.workspace.activeEditor;
+    const cm = (ae?.editor as unknown as { cm?: EditorView } | undefined)?.cm;
+    return cm === view;
+  }
+
+  private editorForView(view: EditorView): Editor | null {
+    const session = this.sessions.find((x) => x.view === view);
+    if (session?.editor) return session.editor;
+    const ae = this.app.workspace.activeEditor;
+    const cm = (ae?.editor as unknown as { cm?: EditorView } | undefined)?.cm;
+    return cm === view ? ae?.editor ?? null : null;
   }
 
   private getActiveNoteTitle(): string {
@@ -464,20 +597,41 @@ export default class GhostwriterPlugin extends Plugin {
   }
 
   private async triggerCompletion(editor: Editor, view: EditorView, instruction: string = "") {
-    if (this.generating) {
-      this.abortCurrent();
-      this.clearGhostInView(view);
+    // Only one live completion per editor: cancel whatever is still running there.
+    const existing = this.runningSessionForView(view);
+    if (existing) {
+      this.cancelSession(existing.id);
     }
+    this.clearGhostInView(view);
     this.preview?.close();
     this.preview = null;
 
-    const cursorPos0 = view.state.selection.main.head;
-    this.popup.showLoading(view, cursorPos0);
-
+    const cursorPos = view.state.selection.main.head;
+    const file = this.app.workspace.getActiveFile();
     const ac = new AbortController();
-    this.currentAbort = ac;
-    this.generating = true;
+    const session: CompletionSession = {
+      id: makeSessionId(),
+      filePath: file instanceof TFile ? file.path : "",
+      title: this.getActiveNoteTitle(),
+      modeName: activeMode(this.settings)?.name ?? "",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      status: "preparing",
+      params: { prefix: "", suffix: "", summary: "", title: this.getActiveNoteTitle() },
+      completion: "",
+      thinking: "",
+      abort: ac,
+      view,
+      editor,
+      anchorOffset: cursorPos,
+      doc: view.state.doc,
+      inline: !this.settings.previewMode,
+    };
+    this.sessions.unshift(session);
+    this.activeSessionId = session.id;
+    this.scheduleSessionsRefresh();
     this.resetCacheStatus();
+    this.popup.showLoading(view, cursorPos);
 
     const summaryOn = this.sessionSummaryOn && this.settings.summaryEnabled;
     let summary = "";
@@ -499,34 +653,33 @@ export default class GhostwriterPlugin extends Plugin {
       return;
     }
 
-    const title = this.getActiveNoteTitle();
     const ctx = this.buildContext(editor);
     const params: CompletionParams = {
       prefix: ctx.prefix,
       suffix: ctx.suffix,
       summary,
       hooks,
-      title,
+      title: session.title,
       instruction,
     };
+    session.params = params;
+    session.anchorOffset = view.state.selection.main.head;
+    session.doc = view.state.doc;
+    session.status = "running";
+    session.updatedAt = Date.now();
+    this.scheduleSessionsRefresh();
 
-    this.currentParams = params;
-    this.currentView = view;
-    this.currentEditor = editor;
-    const cursorPos = view.state.selection.main.head;
-    this.currentPos = cursorPos;
-
-    this.startCompletionRun(params, view, cursorPos, ac);
+    this.startCompletionRun(session, view, session.anchorOffset, ac);
   }
 
   /** Optionally show the assembled prompt for confirmation before the request is sent. */
-  private startCompletionRun(params: CompletionParams, view: EditorView, pos: number, ac: AbortController): void {
+  private startCompletionRun(session: CompletionSession, view: EditorView, pos: number, ac: AbortController): void {
     let payload: ReturnType<CompletionService["buildPayload"]>;
     try {
-      payload = this.service.buildPayload(params, this.settings.stream);
+      payload = this.service.buildPayload(session.params, this.settings.stream);
     } catch (err) {
       this.popup.hide();
-      this.abortCurrent();
+      this.cancelSession(session.id);
       new Notice(`Cannot build prompt: ${(err as Error).message}`, 10000);
       return;
     }
@@ -536,15 +689,15 @@ export default class GhostwriterPlugin extends Plugin {
       if (this.settings.promptPreviewBeforeSend) {
         this.popup.hide();
         new PromptPreviewModal(this.app, payload, {
-          onSend: () => this.launchCompletion(params, view, pos, ac),
+          onSend: () => this.launchCompletion(session, view, pos, ac),
           onCancel: () => {
             this.popup.hide();
-            this.abortCurrent();
+            this.cancelSession(session.id);
           },
         }).open();
         return;
       }
-      this.launchCompletion(params, view, pos, ac);
+      this.launchCompletion(session, view, pos, ac);
     };
 
     if (this.settings.warnOversizePrompt && chars > PROMPT_SIZE_WARNING_CHARS) {
@@ -553,7 +706,7 @@ export default class GhostwriterPlugin extends Plugin {
         onContinue: proceed,
         onCancel: () => {
           this.popup.hide();
-          this.abortCurrent();
+          this.cancelSession(session.id);
         },
         onDisableWarning: async () => {
           this.settings.warnOversizePrompt = false;
@@ -566,14 +719,23 @@ export default class GhostwriterPlugin extends Plugin {
     proceed();
   }
 
-  private launchCompletion(params: CompletionParams, view: EditorView, pos: number, ac: AbortController): void {
+  private launchCompletion(session: CompletionSession, view: EditorView, pos: number, ac: AbortController): void {
     if (this.settings.previewMode) {
+      // Preview mode: inline ghost is off. Background mode previews in the sidebar,
+      // otherwise the modal PreviewCard is used.
+      session.inline = false;
       this.popup.hide();
-      this.runPreviewCompletion(params, view, pos, ac);
-    } else {
-      this.popup.showLoading(view, pos);
-      this.runInlineCompletion(params, view, pos, ac);
+      if (this.settings.backgroundMode) {
+        void this.activateSessionsView(false);
+        this.runInlineCompletion(session, view, pos, ac);
+      } else {
+        this.runPreviewCompletion(session, view, pos, ac);
+      }
+      return;
     }
+    session.inline = true;
+    this.popup.showLoading(view, pos);
+    this.runInlineCompletion(session, view, pos, ac);
   }
 
   /**
@@ -925,85 +1087,104 @@ export default class GhostwriterPlugin extends Plugin {
     this.cacheStatusBarEl.toggleClass("is-na", false);
   }
 
-  private completionContextIsCurrent(view: EditorView, _pos: number, ac: AbortController, doc: typeof view.state.doc): boolean {
-    if (ac.signal.aborted || this.currentAbort !== ac || this.currentView !== view) return false;
-    // Moving the cursor / clicking elsewhere must NOT cancel generation.
-    // Only a document edit invalidates the request (the anchor position would shift).
+  private sessionContextIsCurrent(
+    session: CompletionSession,
+    view: EditorView,
+    doc: typeof view.state.doc
+  ): boolean {
+    if (session.abort.signal.aborted || session.view !== view) return false;
+    // Moving the cursor / switching notes must NOT cancel generation. Only an edit
+    // to the target note invalidates the request (the anchor position would shift).
     if (view.state.doc === doc) return true;
-    ac.abort();
-    this.generating = false;
-    if (this.currentAbort === ac) this.currentAbort = null;
-    this.clearGhostInView(view);
+    this.cancelSession(session.id);
     this.popup.hide();
     return false;
   }
 
-  private runInlineCompletion(params: CompletionParams, view: EditorView, pos: number, ac: AbortController) {
+  private runInlineCompletion(session: CompletionSession, view: EditorView, pos: number, ac: AbortController) {
     const peek = this.settings.peekCoT;
     const sourceDoc = view.state.doc;
+    const renderGhost = (): boolean => session.inline && this.canRenderGhost(view);
 
     let accumulated = "";
 
     this.service.complete(
-      params,
+      session.params,
       {
-        onThinkingDelta: peek ? (delta) => {
+        onThinkingDelta: (delta) => {
           if (ac.signal.aborted) return;
-          this.popup.appendThinking(delta);
-        } : undefined,
+          session.thinking += delta;
+          session.updatedAt = Date.now();
+          this.scheduleSessionsRefresh();
+          if (peek && session.inline && this.isViewActive(view)) this.popup.appendThinking(delta);
+        },
         onCompletionDelta: (delta) => {
-          if (!this.completionContextIsCurrent(view, pos, ac, sourceDoc)) return;
+          if (!this.sessionContextIsCurrent(session, view, sourceDoc)) return;
           accumulated += delta;
-          this.setGhostInView(view, { text: accumulated, pos });
+          session.completion = accumulated;
+          session.updatedAt = Date.now();
+          this.scheduleSessionsRefresh();
+          if (renderGhost()) this.setGhostInView(view, { text: accumulated, pos });
         },
         onRestart: () => {
           if (ac.signal.aborted) return;
           accumulated = "";
-          this.clearGhostInView(view);
+          session.completion = "";
+          if (renderGhost()) this.clearGhostInView(view);
         },
-        onDone: (completion, _thinking, cacheUsage) => {
-          if (!this.completionContextIsCurrent(view, pos, ac, sourceDoc)) return;
+        onDone: (completion, thinking, cacheUsage) => {
+          if (!this.sessionContextIsCurrent(session, view, sourceDoc)) return;
+          session.completion = completion || accumulated;
+          session.thinking = thinking || session.thinking;
+          session.cacheUsage = cacheUsage;
+          session.status = "done";
+          session.updatedAt = Date.now();
           this.recordCacheUsage(cacheUsage);
-          this.generating = false;
-          this.currentAbort = null;
-          if (completion) {
-            this.setGhostInView(view, { text: completion, pos });
-            this.popup.showActions(view, pos);
+          this.scheduleSessionsRefresh();
+          if (session.completion) {
+            if (renderGhost()) this.setGhostInView(view, { text: session.completion, pos });
+            if (session.inline && this.isViewActive(view)) this.popup.showActions(view, pos);
           } else {
-            this.clearGhostInView(view);
-            this.popup.hide();
+            if (renderGhost()) this.clearGhostInView(view);
+            if (session.inline && this.isViewActive(view)) this.popup.hide();
+          }
+          if (!this.isViewActive(view)) {
+            new Notice(`Completion ready: ${session.title} (Ghostwriter sessions sidebar)`, 5000);
           }
         },
         onError: (err) => {
           if (ac.signal.aborted) return;
-          this.generating = false;
-          this.currentAbort = null;
-          this.clearGhostInView(view);
-          this.popup.hide();
-          new Notice(`LLM completion failed: ${err.message}`, 10000);
+          session.status = "error";
+          session.error = err.message;
+          session.updatedAt = Date.now();
+          this.scheduleSessionsRefresh();
+          if (renderGhost()) this.clearGhostInView(view);
+          if (session.inline && this.isViewActive(view)) this.popup.hide();
+          new Notice(`LLM completion failed (${session.title}): ${err.message}`, 10000);
         },
       },
       ac.signal
     );
   }
 
-  private runPreviewCompletion(params: CompletionParams, view: EditorView, pos: number, ac: AbortController) {
+  private runPreviewCompletion(session: CompletionSession, view: EditorView, pos: number, ac: AbortController) {
     const card = new PreviewCard(this.app, {
       onAccept: (completion) => {
-        this.insertAtCursor(completion);
-        this.abortCurrent();
-        this.currentParams = null;
+        session.completion = completion;
+        this.preview = null;
+        void this.acceptSession(session.id);
       },
       onReject: () => {
-        this.abortCurrent();
-        this.currentParams = null;
+        this.preview = null;
+        this.cancelSession(session.id);
+        this.removeSession(session.id);
       },
     });
     this.preview = card;
     card.open();
 
     try {
-      const payload = this.service.buildPayload(params, this.settings.stream);
+      const payload = this.service.buildPayload(session.params, this.settings.stream);
       card.setPromptPayload(payload.messages as unknown as import("./previewCard").PromptMessage[], {
         model: payload.model,
         max_tokens: payload.max_tokens,
@@ -1016,33 +1197,46 @@ export default class GhostwriterPlugin extends Plugin {
     }
 
     this.service.complete(
-      params,
+      session.params,
       {
         onThinkingDelta: (delta) => {
           if (ac.signal.aborted) return;
+          session.thinking += delta;
+          session.updatedAt = Date.now();
+          this.scheduleSessionsRefresh();
           card.appendThinking(delta);
         },
         onCompletionDelta: (delta) => {
           if (ac.signal.aborted) return;
+          session.completion += delta;
+          session.updatedAt = Date.now();
+          this.scheduleSessionsRefresh();
           card.appendCompletion(delta);
         },
         onRestart: () => {
           if (ac.signal.aborted) return;
+          session.completion = "";
           card.restartCompletion();
         },
         onDone: (completion, thinking, cacheUsage) => {
           if (ac.signal.aborted) return;
+          session.completion = completion;
+          session.thinking = thinking || session.thinking;
+          session.cacheUsage = cacheUsage;
+          session.status = "done";
+          session.updatedAt = Date.now();
           this.recordCacheUsage(cacheUsage);
-          this.generating = false;
-          this.currentAbort = null;
+          this.scheduleSessionsRefresh();
           if (completion) card.setCompletion(completion);
           card.setCacheUsage(cacheUsage);
           card.finish();
         },
         onError: (err) => {
           if (ac.signal.aborted) return;
-          this.generating = false;
-          this.currentAbort = null;
+          session.status = "error";
+          session.error = err.message;
+          session.updatedAt = Date.now();
+          this.scheduleSessionsRefresh();
           card.showError(err.message);
         },
       },
@@ -1050,43 +1244,128 @@ export default class GhostwriterPlugin extends Plugin {
     );
   }
 
-  private insertAtCursor(text: string, offset?: number) {
-    const editor = this.currentEditor;
-    if (!editor) return;
-    const pos = offset ?? editor.posToOffset(editor.getCursor("head"));
-    editor.replaceRange(text, editor.offsetToPos(pos), editor.offsetToPos(pos));
-    const newPos = pos + text.length;
-    editor.setCursor(editor.offsetToPos(newPos));
+  private activeEditorView(): EditorView | null {
+    const ae = this.app.workspace.activeEditor;
+    return (ae?.editor as unknown as { cm?: EditorView } | undefined)?.cm ?? null;
   }
 
-  private accept() {
-    const view = this.currentView;
-    const editor = this.currentEditor;
-    if (!view || !editor) return;
-    const ghost = getGhost(view.state);
-    if (!ghost) return;
+  private canReuseEditor(session: CompletionSession): boolean {
+    if (!session.editor || !session.view) return false;
+    if (!this.canRenderGhost(session.view)) return false;
+    try {
+      return session.view.state.doc === session.doc;
+    } catch {
+      return false;
+    }
+  }
 
-    this.abortCurrent();
-    const text = ghost.text;
-    const pos = ghost.pos;
-    this.clearGhostInView(view);
+  /** Insert text into the target file at a character offset (used when the original editor is gone). */
+  private async insertIntoFile(path: string, offset: number, text: string): Promise<boolean> {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) {
+      new Notice(`Cannot insert: ${path} was not found`);
+      return false;
+    }
+    try {
+      await this.app.vault.process(file, (data) => {
+        const at = Math.max(0, Math.min(offset, data.length));
+        return data.slice(0, at) + text + data.slice(at);
+      });
+      return true;
+    } catch (err) {
+      new Notice(`Cannot insert into ${file.basename}: ${(err as Error).message}`);
+      return false;
+    }
+  }
+
+  async acceptSession(id: string): Promise<void> {
+    const session = this.findSession(id);
+    if (!session || !session.completion) return;
+    const text = session.completion;
+    let inserted = false;
+    if (this.canReuseEditor(session) && session.editor) {
+      try {
+        const editor = session.editor;
+        editor.replaceRange(text, editor.offsetToPos(session.anchorOffset), editor.offsetToPos(session.anchorOffset));
+        editor.setCursor(editor.offsetToPos(session.anchorOffset + text.length));
+        inserted = true;
+      } catch {
+        inserted = false;
+      }
+    }
+    if (!inserted && session.filePath) {
+      inserted = await this.insertIntoFile(session.filePath, session.anchorOffset, text);
+    }
+    if (!inserted) return;
+    if (session.view) this.clearGhostInView(session.view);
     this.popup.hide();
-
-    // Insert at the suggestion anchor, not wherever the cursor currently is
-    // (the user may have clicked elsewhere while generating without cancelling).
-    this.insertAtCursor(text, pos);
+    this.removeSession(id);
   }
 
-  private dismiss() {
-    const view = this.currentView;
+  async openSessionNote(id: string): Promise<void> {
+    const session = this.findSession(id);
+    if (!session?.filePath) return;
+    const file = this.app.vault.getAbstractFileByPath(session.filePath);
+    if (!(file instanceof TFile)) return;
+    await this.app.workspace.getLeaf(false).openFile(file);
+  }
+
+  retrySession(id: string): void {
+    const session = this.findSession(id);
+    if (!session?.editor || !session.view) {
+      new Notice("Cannot retry: the original editor is closed");
+      return;
+    }
+    const editor = session.editor;
+    const view = session.view;
+    const instruction = session.params.instruction ?? "";
+    this.removeSession(id);
+    void this.triggerCompletion(editor, view, instruction);
+  }
+
+  /** Assembled messages for a session (sidebar prompt preview). */
+  sessionPrompt(session: CompletionSession): { role: string; content: string }[] | null {
+    try {
+      return this.service.buildPayload(session.params, this.settings.stream).messages;
+    } catch {
+      return null;
+    }
+  }
+
+  private accept(view?: EditorView) {
+    const v = view ?? this.activeEditorView();
+    if (!v) return;
+    const ghost = getGhost(v.state);
+    if (!ghost) return;
+    const session = this.sessions.find((s) => s.view === v);
+    if (session) {
+      if (session.completion) void this.acceptSession(session.id);
+      return;
+    }
+    const editor = this.editorForView(v);
+    if (!editor) return;
+    this.clearGhostInView(v);
+    this.popup.hide();
+    // Insert at the suggestion anchor, not wherever the cursor currently is.
+    editor.replaceRange(ghost.text, editor.offsetToPos(ghost.pos), editor.offsetToPos(ghost.pos));
+    editor.setCursor(editor.offsetToPos(ghost.pos + ghost.text.length));
+  }
+
+  private dismiss(view?: EditorView) {
+    const v = view ?? this.activeEditorView();
+    const target = v
+      ? this.runningSessionForView(v) ?? this.sessions.find((s) => s.view === v) ?? this.newestRunningSession()
+      : this.newestRunningSession();
     if (this.preview) {
       this.preview.close();
       this.preview = null;
     }
-    if (view) this.clearGhostInView(view);
+    if (target) {
+      if (target.view) this.clearGhostInView(target.view);
+      this.cancelSession(target.id);
+    }
+    if (v) this.clearGhostInView(v);
     this.popup.hide();
-    this.abortCurrent();
-    this.currentParams = null;
   }
 
   /**
@@ -1138,45 +1417,24 @@ export default class GhostwriterPlugin extends Plugin {
     }
   }
 
-  private async regenerate() {
-    const view = this.currentView;
-    const editor = this.currentEditor;
-    const params = this.currentParams;
-    if (!view || !editor || !params) return;
-    this.abortCurrent();
+  private regenerate() {
+    const view = this.activeEditorView() ?? this.sessions.find((s) => s.view)?.view ?? null;
+    if (!view) return;
+    const session =
+      this.sessions.find((s) => s.view === view) ??
+      this.findSession(this.activeSessionId ?? "") ??
+      this.sessions.find((s) => s.status === "done");
+    const editor = session?.editor ?? null;
+    if (!editor) return;
+    const instruction = session?.params.instruction ?? "";
+    // Replace the previous suggestion for this view with a fresh session.
+    for (const s of this.sessions.filter(
+      (x) => x.view === view && x.status !== "running" && x.status !== "preparing"
+    )) {
+      this.removeSession(s.id);
+    }
     this.clearGhostInView(view);
-    const ac = new AbortController();
-    this.currentAbort = ac;
-    this.generating = true;
-    this.resetCacheStatus();
-    let summary = params.summary;
-    if (this.sessionSummaryOn && this.settings.summaryEnabled) {
-      try {
-        summary = await this.buildSummaryContext(ac.signal);
-      } catch (err) {
-        console.warn("regenerate summary build failed", err);
-      }
-      if (ac.signal.aborted) {
-        this.popup.hide();
-        return;
-      }
-      params.summary = summary;
-    }
-    const cursorPos = view.state.selection.main.head;
-    this.currentPos = cursorPos;
-    const ctx = this.buildContext(editor);
-    params.prefix = ctx.prefix;
-    params.suffix = ctx.suffix;
-    params.title = this.getActiveNoteTitle();
-    try {
-      params.hooks = await this.buildHookContext(ac.signal);
-    } catch (err) {
-      console.warn("regenerate hooks build failed", err);
-    }
-    if (ac.signal.aborted) {
-      this.popup.hide();
-      return;
-    }
-    this.startCompletionRun(params, view, cursorPos, ac);
+    this.popup.hide();
+    void this.triggerCompletion(editor, view, instruction);
   }
 }
