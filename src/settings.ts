@@ -9,6 +9,34 @@ export type MessageRole = "user" | "assistant" | "system";
  */
 export type ContextMode = "full" | "in-note";
 
+export const DEFAULT_COT_TAG = "thinking";
+export const DEFAULT_COMPLETION_TAG = "completion";
+
+/** Strip angle brackets / whitespace and validate a tag name, falling back when invalid. */
+export function normalizeTagName(raw: unknown, fallback: string): string {
+  const t = (typeof raw === "string" ? raw : "")
+    .trim()
+    .replace(/^<\s*\/?/, "")
+    .replace(/\s*\/?>$/, "")
+    .replace(/\s+/g, "");
+  return /^[A-Za-z_][\w.:-]*$/.test(t) ? t : fallback;
+}
+
+/** Accept an array or a comma/space-separated string; normalize and dedupe tag names. */
+export function normalizeTagList(raw: unknown): string[] {
+  const items: unknown[] = Array.isArray(raw)
+    ? raw
+    : typeof raw === "string"
+      ? raw.split(/[,\s]+/)
+      : [];
+  const out: string[] = [];
+  for (const item of items) {
+    const t = normalizeTagName(item, "");
+    if (t && !out.includes(t)) out.push(t);
+  }
+  return out;
+}
+
 export interface ProviderProfile {
   id: string;
   name: string;
@@ -61,6 +89,12 @@ export interface ModeProfile {
   summaryMaxWords: number;
   summaryTemperature: number;
   summaryInputChars: number;
+  /** Tag whose content is captured as thinking/CoT and stripped from the completion. */
+  cotTag: string;
+  /** Tag wrapping the final completion text. */
+  completionTag: string;
+  /** Extra tags whose entire content is removed from the completion. */
+  stripTags: string[];
   contextMode: ContextMode;
   inNoteSummaryPrompt: string;
 }
@@ -89,6 +123,9 @@ export const MODE_KEYS = [
   "summaryMaxWords",
   "summaryTemperature",
   "summaryInputChars",
+  "cotTag",
+  "completionTag",
+  "stripTags",
   "contextMode",
   "inNoteSummaryPrompt",
 ] as const satisfies readonly (keyof ModeProfile)[];
@@ -145,6 +182,12 @@ export interface GhostwriterSettings {
   globalHooks: HookItem[];
   /** Keep completions running when switching notes and manage them in the right sidebar. */
   backgroundMode: boolean;
+  /** Tag whose content is captured as thinking/CoT and stripped from the completion. */
+  cotTag: string;
+  /** Tag wrapping the final completion text. */
+  completionTag: string;
+  /** Extra tags whose entire content is removed from the completion. */
+  stripTags: string[];
   contextMode: ContextMode;
   inNoteSummaryPrompt: string;
   acceptKey: string;
@@ -440,6 +483,9 @@ export function defaultModeProfiles(lang: PromptLanguage): ModeProfile[] {
       summaryMaxWords: 100,
       summaryTemperature: 0.3,
       summaryInputChars: 8000,
+      cotTag: DEFAULT_COT_TAG,
+      completionTag: DEFAULT_COMPLETION_TAG,
+      stripTags: [],
       contextMode: "full",
       inNoteSummaryPrompt: zh ? DEFAULT_NOVEL_SUMMARY_PROMPT : DEFAULT_NOVEL_SUMMARY_PROMPT_EN,
     },
@@ -468,6 +514,9 @@ export function defaultModeProfiles(lang: PromptLanguage): ModeProfile[] {
       summaryMaxWords: 2000,
       summaryTemperature: 0.8,
       summaryInputChars: 81920,
+      cotTag: DEFAULT_COT_TAG,
+      completionTag: DEFAULT_COMPLETION_TAG,
+      stripTags: [],
       contextMode: "in-note",
       inNoteSummaryPrompt: zh ? DEFAULT_NOVEL_SUMMARY_PROMPT : DEFAULT_NOVEL_SUMMARY_PROMPT_EN,
     },
@@ -496,6 +545,9 @@ export function defaultModeProfiles(lang: PromptLanguage): ModeProfile[] {
       summaryMaxWords: 100,
       summaryTemperature: 0.3,
       summaryInputChars: 8000,
+      cotTag: DEFAULT_COT_TAG,
+      completionTag: DEFAULT_COMPLETION_TAG,
+      stripTags: [],
       contextMode: "full",
       inNoteSummaryPrompt: zh ? DEFAULT_NOVEL_SUMMARY_PROMPT : DEFAULT_NOVEL_SUMMARY_PROMPT_EN,
     },
@@ -588,6 +640,9 @@ export const DEFAULT_SETTINGS: GhostwriterSettings = {
   globalHooksEnabled: false,
   globalHooks: [],
   backgroundMode: false,
+  cotTag: DEFAULT_COT_TAG,
+  completionTag: DEFAULT_COMPLETION_TAG,
+  stripTags: [],
   contextMode: "full",
   inNoteSummaryPrompt: DEFAULT_NOVEL_SUMMARY_PROMPT_EN,
   acceptKey: "Shift+Insert",
@@ -708,6 +763,14 @@ function coerceModeNumbers(m: ModeProfile): void {
   if (!ROLES.includes(m.cotTemplateRole)) m.cotTemplateRole = "user";
   if (!ROLES.includes(m.cotTriggerRole)) m.cotTriggerRole = "system";
   m.contextMode = coerceContextMode(m.contextMode) ?? "full";
+  m.cotTag = normalizeTagName(m.cotTag, DEFAULT_COT_TAG);
+  m.completionTag = normalizeTagName(m.completionTag, DEFAULT_COMPLETION_TAG);
+  if (m.completionTag === m.cotTag) {
+    m.completionTag = m.cotTag === DEFAULT_COMPLETION_TAG ? "text" : DEFAULT_COMPLETION_TAG;
+  }
+  m.stripTags = normalizeTagList(m.stripTags).filter(
+    (t) => t !== m.cotTag && t !== m.completionTag
+  );
   if (typeof m.inNoteSummaryPrompt !== "string") m.inNoteSummaryPrompt = DEFAULT_NOVEL_SUMMARY_PROMPT_EN;
 }
 

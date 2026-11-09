@@ -13,6 +13,7 @@ GitHub Copilot-style inline writing completion for Obsidian, using any OpenAI-co
 - **In-note summaries** for long fiction (`[Summary]` / `[摘要]` blocks).
 - Separate note summaries (`summary-N.md`) with link-following recall.
 - Optional pre-send prompt preview, prompt-cache hit-rate reporting, configurable accept/dismiss keys.
+- Customizable CoT / completion wrapper tags, plus extra strip tags for models that reuse or echo tags.
 
 ## Quick Start
 
@@ -35,6 +36,16 @@ A mode is a named preset owning the system prompt, prompt template, extra prompt
 Manage them under **Writing modes** (rename, duplicate, add, delete, restore defaults) or switch with the `Switch writing mode` command. Providers, the summary folder/scan limit, per-file summary switches and UI options are global.
 
 Templates support `{title}`, `{summary}`, `{hooks}`, `{extra}`, `{prefix}`, `{suffix}`, `{max_words}` and `<<<CURSOR>>>` / `<<<光标>>>`.
+
+### Custom CoT / completion tags
+
+Output is stripped using configurable wrapper tags (per mode, under **Reasoning**):
+
+- **CoT tag** — its content is captured as thinking and removed from the completion (`thinking`, `plan`, `think`, `plot_plan`, …).
+- **Completion tag** — wraps the final text (`completion`, `text`, `out`, …).
+- **Strip tags** — extra comma-separated tags whose entire content is removed outright (`analysis`, `scratch`, …).
+
+Prompts that still use `<thinking>` / `<completion>` are rewritten to the configured tags at request time, so changing a tag works without editing your templates.
 
 ## Global Hooks
 

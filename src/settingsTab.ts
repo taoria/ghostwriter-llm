@@ -7,6 +7,8 @@ import {
   DEFAULT_SYSTEM_PROMPT,
   DEFAULT_PROMPT_TEMPLATE,
   DEFAULT_COT_TEMPLATE,
+  DEFAULT_COT_TAG,
+  DEFAULT_COMPLETION_TAG,
   DEFAULT_NOVEL_SUMMARY_PROMPT_EN,
   defaultPromptsFor,
   PromptLanguage,
@@ -548,6 +550,48 @@ export class GhostwriterSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           });
       });
+
+    new Setting(containerEl)
+      .setName("CoT tag")
+      .setDesc("Tag name whose content is captured as thinking and stripped from the completion. Examples: thinking, plan, think, plot_plan. Prompts that use <thinking> are rewritten to this tag automatically.")
+      .addText((text) =>
+        text
+          .setPlaceholder(DEFAULT_COT_TAG)
+          .setValue(this.plugin.settings.cotTag || DEFAULT_COT_TAG)
+          .onChange(async (value) => {
+            this.plugin.settings.cotTag = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Completion tag")
+      .setDesc("Tag name wrapping the final text. Change it when the model echoes the format block or another <completion> tag collides (e.g. text, out, prose). Prompts that use <completion> are rewritten automatically.")
+      .addText((text) =>
+        text
+          .setPlaceholder(DEFAULT_COMPLETION_TAG)
+          .setValue(this.plugin.settings.completionTag || DEFAULT_COMPLETION_TAG)
+          .onChange(async (value) => {
+            this.plugin.settings.completionTag = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Strip tags")
+      .setDesc("Comma-separated extra tag names whose entire content is removed from the completion (not shown as thinking). Examples: analysis, scratch, notes.")
+      .addText((text) =>
+        text
+          .setPlaceholder("analysis, scratch")
+          .setValue((this.plugin.settings.stripTags ?? []).join(", "))
+          .onChange(async (value) => {
+            this.plugin.settings.stripTags = value
+              .split(/[,\s]+/)
+              .map((t) => t.replace(/^<\/?|\/?>$/g, "").trim())
+              .filter(Boolean);
+            await this.plugin.saveSettings();
+          })
+      );
 
     section("Context strategy", "How the text before the cursor is assembled for the active mode.");
     new Setting(containerEl)

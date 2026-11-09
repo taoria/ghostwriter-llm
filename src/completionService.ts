@@ -9,6 +9,10 @@ import {
   DEFAULT_PROMPT_TEMPLATE,
   DEFAULT_COT_TEMPLATE,
   DEFAULT_COT_TRIGGER,
+  DEFAULT_COT_TAG,
+  DEFAULT_COMPLETION_TAG,
+  normalizeTagName,
+  normalizeTagList,
 } from "./settings";
 
 export interface CompletionParams {
@@ -62,9 +66,11 @@ export function buildMessages(p: CompletionParams, settings: GhostwriterSettings
   const hooks = p.hooks?.trim() ?? "";
   const extra = settings.extraPrompt?.trim() ?? "";
   const title = p.title?.trim() ?? "";
-  const tpl = settings.promptTemplate && settings.promptTemplate.trim()
+  const tags = tagSetFor(settings);
+  const rawTpl = settings.promptTemplate && settings.promptTemplate.trim()
     ? settings.promptTemplate
     : DEFAULT_PROMPT_TEMPLATE;
+  const tpl = applyTagAliases(rawTpl, tags);
   // Older custom templates have no {hooks} slot: fold the hook blocks into {summary}
   // so they are still sent instead of being silently dropped.
   const hasHooksSlot = tpl.includes("{hooks}");
@@ -83,7 +89,7 @@ export function buildMessages(p: CompletionParams, settings: GhostwriterSettings
 
   const messages: ChatMessage[] = [];
 
-  const systemContent = fillTemplate(settings.systemPrompt, {
+  const systemContent = fillTemplate(applyTagAliases(settings.systemPrompt, tags), {
     summary: "",
     hooks: "",
     extra: "",
@@ -100,17 +106,19 @@ export function buildMessages(p: CompletionParams, settings: GhostwriterSettings
     const cotTpl = settings.cotTemplate && settings.cotTemplate.trim()
       ? settings.cotTemplate
       : DEFAULT_COT_TEMPLATE;
-    if (cotTpl.trim()) {
-      messages.push({ role: settings.cotTemplateRole, content: cotTpl });
+    const cot = applyTagAliases(cotTpl, tags);
+    if (cot.trim()) {
+      messages.push({ role: settings.cotTemplateRole, content: cot });
     }
   }
 
   messages.push({ role: settings.promptTemplateRole, content: promptContent });
 
   if (settings.cotEnabled) {
-    const trigger = settings.cotTrigger && settings.cotTrigger.trim()
+    const rawTrigger = settings.cotTrigger && settings.cotTrigger.trim()
       ? settings.cotTrigger.trim()
       : DEFAULT_COT_TRIGGER;
+    const trigger = applyTagAliases(rawTrigger, tags);
     if (trigger.trim()) {
       messages.push({ role: settings.cotTriggerRole, content: trigger });
     }
@@ -151,27 +159,83 @@ function mergeAdjacent(messages: ChatMessage[]): ChatMessage[] {
   return out;
 }
 
-const COMPLETION_OPEN = "<completion>";
-const COMPLETION_CLOSE = "</completion>";
-const THINKING_OPEN = "<thinking>";
-const THINKING_CLOSE = "</thinking>";
+export interface TagSetOptions {
+  completionTag?: string;
+  cotTag?: string;
+  stripTags?: unknown;
+}
 
-function streamPrefillThinking(settings: GhostwriterSettings): string {
+/** Resolved wrapper/strip tag names and their derived open/close forms. */
+export class TagSet {
+  readonly completion: string;
+  readonly completionOpen: string;
+  readonly completionClose: string;
+  readonly thinking: string;
+  readonly thinkingOpen: string;
+  readonly thinkingClose: string;
+  readonly strip: string[];
+  readonly tails: string[];
+  readonly maxTail: number;
+  readonly hiddenOpens: string[];
+
+  constructor(opts: TagSetOptions) {
+    this.completion = normalizeTagName(opts.completionTag, DEFAULT_COMPLETION_TAG);
+    let thinking = normalizeTagName(opts.cotTag, DEFAULT_COT_TAG);
+    if (thinking === this.completion) {
+      thinking = thinking === DEFAULT_COT_TAG ? "think" : DEFAULT_COT_TAG;
+    }
+    this.thinking = thinking;
+    this.strip = normalizeTagList(opts.stripTags).filter(
+      (t) => t !== this.completion && t !== this.thinking
+    );
+    this.completionOpen = `<${this.completion}>`;
+    this.completionClose = `</${this.completion}>`;
+    this.thinkingOpen = `<${this.thinking}>`;
+    this.thinkingClose = `</${this.thinking}>`;
+    const names = [this.completion, this.thinking, ...this.strip];
+    this.tails = names.flatMap((n) => [`${n}>`, `/${n}>`]);
+    this.maxTail = Math.max(1, ...this.tails.map((t) => t.length)) + 1;
+    this.hiddenOpens = [this.thinking, ...this.strip].map((n) => `<${n}>`);
+  }
+}
+
+export function tagSetFor(s: GhostwriterSettings): TagSet {
+  return new TagSet({ completionTag: s.completionTag, cotTag: s.cotTag, stripTags: s.stripTags });
+}
+
+/** Rewrite the built-in wrapper tags in a prompt/template to the configured names. */
+export function applyTagAliases(text: string, tags: TagSet): string {
+  if (!text) return text;
+  let out = text;
+  if (tags.completion !== DEFAULT_COMPLETION_TAG) {
+    out = out
+      .replace(new RegExp(`<${DEFAULT_COMPLETION_TAG}>`, "g"), tags.completionOpen)
+      .replace(new RegExp(`</${DEFAULT_COMPLETION_TAG}>`, "g"), tags.completionClose);
+  }
+  if (tags.thinking !== DEFAULT_COT_TAG) {
+    out = out
+      .replace(new RegExp(`<${DEFAULT_COT_TAG}>`, "g"), tags.thinkingOpen)
+      .replace(new RegExp(`</${DEFAULT_COT_TAG}>`, "g"), tags.thinkingClose);
+  }
+  return out;
+}
+
+function streamPrefillThinking(settings: GhostwriterSettings, tags: TagSet): string {
   if (!settings.cotEnabled) return "";
   if (settings.cotTriggerRole !== "assistant") return "";
-  const t = (settings.cotTrigger ?? "").trim();
+  const t = applyTagAliases(settings.cotTrigger ?? "", tags).trim();
   if (!t) return "";
   const lower = t.toLowerCase();
-  const idx = lower.lastIndexOf(THINKING_OPEN);
+  const idx = lower.lastIndexOf(tags.thinkingOpen.toLowerCase());
   if (idx < 0) return "";
   return t.slice(idx);
 }
 
-export function extractThinking(full: string): string {
-  const start = full.lastIndexOf(THINKING_OPEN);
+export function extractThinking(full: string, tags: TagSet): string {
+  const start = full.lastIndexOf(tags.thinkingOpen);
   if (start < 0) return "";
-  const afterOpen = full.slice(start + THINKING_OPEN.length);
-  const end = afterOpen.indexOf(THINKING_CLOSE);
+  const afterOpen = full.slice(start + tags.thinkingOpen.length);
+  const end = afterOpen.indexOf(tags.thinkingClose);
   if (end >= 0) return afterOpen.slice(0, end);
   return afterOpen;
 }
@@ -180,24 +244,37 @@ function trimOuter(s: string): string {
   return s.replace(/^[\s\r\n]+/, "").replace(/[\s\r\n]+$/, "");
 }
 
-export function extractCompletion(full: string): string {
-  const start = full.lastIndexOf(COMPLETION_OPEN);
-  if (start < 0) {
-    // No opening tag: still drop a stray closing tag if the model emitted one.
-    const close = full.indexOf(COMPLETION_CLOSE);
-    return trimOuter(close >= 0 ? full.slice(0, close) : full);
+/** Remove complete (or dangling) hidden-tag sections from text. */
+function stripTagBlocks(text: string, names: string[]): string {
+  let out = text;
+  for (const name of names) {
+    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    out = out.replace(new RegExp(`<${esc}>[\\s\\S]*?</${esc}>`, "gi"), "");
+    out = out.replace(new RegExp(`<${esc}>[\\s\\S]*$`, "i"), "");
   }
-  const afterOpen = full.slice(start + COMPLETION_OPEN.length);
-  const end = afterOpen.lastIndexOf(COMPLETION_CLOSE);
-  const raw = end >= 0 ? afterOpen.slice(0, end) : afterOpen;
-  return trimOuter(raw);
+  return out;
 }
 
-export function extractCompletionStrict(full: string): string {
-  const start = full.lastIndexOf(COMPLETION_OPEN);
+export function extractCompletion(full: string, tags: TagSet): string {
+  const start = full.lastIndexOf(tags.completionOpen);
+  let body: string;
+  if (start < 0) {
+    // No opening tag: still drop a stray closing tag if the model emitted one.
+    const close = full.indexOf(tags.completionClose);
+    body = close >= 0 ? full.slice(0, close) : full;
+  } else {
+    const afterOpen = full.slice(start + tags.completionOpen.length);
+    const end = afterOpen.lastIndexOf(tags.completionClose);
+    body = end >= 0 ? afterOpen.slice(0, end) : afterOpen;
+  }
+  return trimOuter(stripTagBlocks(body, [tags.thinking, ...tags.strip]));
+}
+
+export function extractCompletionStrict(full: string, tags: TagSet): string {
+  const start = full.lastIndexOf(tags.completionOpen);
   if (start < 0) return "";
-  const afterOpen = full.slice(start + COMPLETION_OPEN.length);
-  const end = afterOpen.lastIndexOf(COMPLETION_CLOSE);
+  const afterOpen = full.slice(start + tags.completionOpen.length);
+  const end = afterOpen.lastIndexOf(tags.completionClose);
   return end >= 0 ? afterOpen.slice(0, end) : afterOpen;
 }
 
@@ -305,12 +382,12 @@ export function parseSSEBody(body: string): SSEEvent[] {
   return events;
 }
 
-function ingestSSELine(line: string, state: StreamState, cb: CompletionCallbacks): boolean {
+function ingestSSELine(line: string, state: StreamState, cb: CompletionCallbacks, tags: TagSet): boolean {
   const event = parseSSELine(line.trim());
   if (!event) return false;
   if (event.done) return true;
   if (event.cacheUsage) state.cacheUsage = event.cacheUsage;
-  if (event.delta) ingestDelta(state, event.delta, cb);
+  if (event.delta) ingestDelta(state, event.delta, cb, tags);
   return false;
 }
 
@@ -346,13 +423,13 @@ function newStreamState(prefill: string): StreamState {
 
 const TRAILING_NL = /[\r\n]+$/;
 
-function rawFeed(state: StreamState, delta: string, cb: CompletionCallbacks): void {
+function rawFeed(state: StreamState, delta: string, cb: CompletionCallbacks, tags: TagSet): void {
   let d = delta;
   if (!state.leadingStripped) {
     d = d.replace(/^[\s\r\n]+/, "");
     if (d) state.leadingStripped = true;
   }
-  flushTrailingSafe(state, d, cb);
+  flushTrailingSafe(state, d, cb, tags);
 }
 
 /** Switch to strict tag extraction; if plain text was already streamed, ask receivers to clear it. */
@@ -364,12 +441,12 @@ function enterTagMode(state: StreamState, cb: CompletionCallbacks): void {
   state.prevThinking = "";
 }
 
-function ingestDelta(state: StreamState, delta: string, cb: CompletionCallbacks): void {
+function ingestDelta(state: StreamState, delta: string, cb: CompletionCallbacks, tags: TagSet): void {
   state.full += delta;
 
   if (state.mode === "detect") {
     const hasOpen =
-      state.full.includes(COMPLETION_OPEN) || state.full.includes(THINKING_OPEN);
+      state.full.includes(tags.completionOpen) || tags.hiddenOpens.some((o) => state.full.includes(o));
     if (hasOpen) {
       enterTagMode(state, cb);
     } else {
@@ -378,31 +455,31 @@ function ingestDelta(state: StreamState, delta: string, cb: CompletionCallbacks)
       if (probe.startsWith("<")) {
         const lt = probe.lastIndexOf("<");
         const cand = probe.slice(lt);
-        if (cand.length <= KNOWN_TAG_TAILS[1].length + 1 && possibleTagPrefix(cand)) return;
+        if (cand.length <= tags.maxTail && possibleTagPrefix(cand, tags)) return;
       }
       // Commit to plain-text mode; nothing was emitted while detecting,
       // so replaying the whole buffer through the raw path is safe.
       state.mode = "raw";
       const buffered = state.full;
       state.full = "";
-      ingestDelta(state, buffered, cb);
+      ingestDelta(state, buffered, cb, tags);
       return;
     }
   }
 
-  const hasCompletion = state.full.includes(COMPLETION_OPEN);
-  const hasThinking = state.full.includes(THINKING_OPEN);
+  const hasCompletion = state.full.includes(tags.completionOpen);
+  const hasThinking = state.full.includes(tags.thinkingOpen);
 
   if (state.mode === "raw") {
     // Locked raw: a late wrapper tag from a misbehaving model is streamed as-is;
     // the final onDone text still strips it.
-    rawFeed(state, delta, cb);
+    rawFeed(state, delta, cb, tags);
     if (delta) state.rawEmitted = true;
     return;
   }
 
   if (hasThinking) {
-    const curThinking = extractThinking(state.full);
+    const curThinking = extractThinking(state.full, tags);
     if (curThinking.length > state.prevThinking.length) {
       cb.onThinkingDelta?.(curThinking.slice(state.prevThinking.length));
       state.prevThinking = curThinking;
@@ -411,7 +488,7 @@ function ingestDelta(state: StreamState, delta: string, cb: CompletionCallbacks)
 
   if (!hasCompletion) return;
 
-  let curCompletion = extractCompletionStrict(state.full);
+  let curCompletion = extractCompletionStrict(state.full, tags);
   curCompletion = curCompletion.replace(/^[\s\r\n]+/, "");
   if (!state.leadingStripped && curCompletion) {
     state.leadingStripped = true;
@@ -419,23 +496,22 @@ function ingestDelta(state: StreamState, delta: string, cb: CompletionCallbacks)
   if (curCompletion.length > state.prevCompletion.length) {
     const toEmit = curCompletion.slice(state.prevCompletion.length);
     state.prevCompletion = curCompletion;
-    flushTrailingSafe(state, toEmit, cb);
+    flushTrailingSafe(state, toEmit, cb, tags);
   }
 }
 
-const KNOWN_TAG_TAILS = ["completion>", "/completion>", "thinking>", "/thinking>"];
-
-/** True if "<..." fragment could still grow into one of our wrapper tags. */
-function possibleTagPrefix(fragment: string): boolean {
+/** True if "<..." fragment could still grow into one of our configured tags. */
+function possibleTagPrefix(fragment: string, tags: TagSet): boolean {
   if (!fragment.startsWith("<")) return false;
   const rest = fragment.slice(1);
-  return KNOWN_TAG_TAILS.some((t) => t.startsWith(rest));
+  return tags.tails.some((t) => t.startsWith(rest));
 }
 
 function flushTrailingSafe(
   state: StreamState,
   chunk: string,
-  cb: CompletionCallbacks
+  cb: CompletionCallbacks,
+  tags: TagSet
 ): void {
   if (!chunk) return;
   const combined = state.tailBuffer + chunk;
@@ -446,8 +522,8 @@ function flushTrailingSafe(
   // so tag characters never leak into the visible completion.
   const lt = combined.lastIndexOf("<", Math.max(0, lastNon - 1));
   let safeEnd = lastNon;
-  if (lt >= 0 && lastNon - lt <= KNOWN_TAG_TAILS[1].length + 1) {
-    if (possibleTagPrefix(combined.slice(lt, lastNon))) safeEnd = lt;
+  if (lt >= 0 && lastNon - lt <= tags.maxTail) {
+    if (possibleTagPrefix(combined.slice(lt, lastNon), tags)) safeEnd = lt;
   }
   const safe = combined.slice(0, safeEnd);
   const tail = combined.slice(safeEnd);
@@ -456,12 +532,12 @@ function flushTrailingSafe(
 }
 
 /** Commit any undecided buffer and emit whatever was held back (e.g. a trailing "<" that was plain text). */
-function finalizeStream(state: StreamState, cb: CompletionCallbacks): void {
+function finalizeStream(state: StreamState, cb: CompletionCallbacks, tags: TagSet): void {
   if (state.mode === "detect") {
     state.mode = "raw";
     const buffered = state.full;
     state.full = "";
-    ingestDelta(state, buffered, cb);
+    ingestDelta(state, buffered, cb, tags);
   }
   if (state.tailBuffer) {
     cb.onCompletionDelta?.(state.tailBuffer);
@@ -602,11 +678,12 @@ export class CompletionService {
     } catch {
       content = "";
     }
-    const prefilled = streamPrefillThinking(this.settings());
+    const tags = tagSetFor(this.settings());
+    const prefilled = streamPrefillThinking(this.settings(), tags);
     const fullContent = prefilled + content;
-    const thinking = extractThinking(fullContent);
-    // Always strip <thinking>/<completion> wrappers, whether or not CoT is enabled.
-    const completion = extractCompletion(fullContent);
+    const thinking = extractThinking(fullContent, tags);
+    // Always strip thinking/completion wrappers, whether or not CoT is enabled.
+    const completion = extractCompletion(fullContent, tags);
     if (thinking) cb.onThinkingDelta?.(thinking);
     if (completion) cb.onCompletionDelta?.(completion);
     cb.onDone(completion, thinking, cacheUsage);
@@ -633,6 +710,7 @@ export class CompletionService {
       "Accept-Encoding": "identity",
       "Content-Length": String(new TextEncoder().encode(body).length),
     };
+    const tags = tagSetFor(this.settings());
 
     return new Promise<boolean>((resolve) => {
       if (signal.aborted) {
@@ -646,7 +724,7 @@ export class CompletionService {
         resolve(r);
       };
 
-      const state = newStreamState(streamPrefillThinking(this.settings()));
+      const state = newStreamState(streamPrefillThinking(this.settings(), tags));
       let buffer = "";
       let errorBody = "";
 
@@ -680,7 +758,7 @@ export class CompletionService {
               const line = buffer.slice(0, idx).trim();
               buffer = buffer.slice(idx + 1);
               if (!line) continue;
-              if (ingestSSELine(line, state, cb)) {
+              if (ingestSSELine(line, state, cb, tags)) {
                 buffer = "";
                 break;
               }
@@ -697,11 +775,11 @@ export class CompletionService {
               done(true);
               return;
             }
-            if (buffer.trim()) ingestSSELine(buffer, state, cb);
-            finalizeStream(state, cb);
+            if (buffer.trim()) ingestSSELine(buffer, state, cb, tags);
+            finalizeStream(state, cb, tags);
             cb.onDone(
-              extractCompletion(state.full),
-              extractThinking(state.full),
+              extractCompletion(state.full, tags),
+              extractThinking(state.full, tags),
               state.cacheUsage
             );
             done(true);
@@ -758,7 +836,8 @@ export class CompletionService {
       const reader = resp.body.getReader();
       const decoder = new TextDecoder("utf-8");
       let buffer = "";
-      const state = newStreamState(streamPrefillThinking(this.settings()));
+      const tags = tagSetFor(this.settings());
+      const state = newStreamState(streamPrefillThinking(this.settings(), tags));
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -768,15 +847,15 @@ export class CompletionService {
            const line = buffer.slice(0, idx).trim();
            buffer = buffer.slice(idx + 1);
            if (!line) continue;
-           if (ingestSSELine(line, state, cb)) {
+           if (ingestSSELine(line, state, cb, tags)) {
              buffer = "";
              break;
            }
          }
        }
-       if (buffer.trim()) ingestSSELine(buffer, state, cb);
-       finalizeStream(state, cb);
-       cb.onDone(extractCompletion(state.full), extractThinking(state.full), state.cacheUsage);
+       if (buffer.trim()) ingestSSELine(buffer, state, cb, tags);
+       finalizeStream(state, cb, tags);
+       cb.onDone(extractCompletion(state.full, tags), extractThinking(state.full, tags), state.cacheUsage);
       return true;
     } catch (err) {
       if (signal.aborted) return false;
@@ -796,15 +875,16 @@ export class CompletionService {
       throw apiError(resp.status, resp.text);
     }
     const deltas = parseSSEBody(resp.text);
-    const state = newStreamState(streamPrefillThinking(this.settings()));
+    const tags = tagSetFor(this.settings());
+    const state = newStreamState(streamPrefillThinking(this.settings(), tags));
     for (const event of deltas) {
       if (signal.aborted) return;
       if (event.cacheUsage) state.cacheUsage = event.cacheUsage;
-      if (event.delta) ingestDelta(state, event.delta, cb);
+      if (event.delta) ingestDelta(state, event.delta, cb, tags);
       await sleep(15);
     }
-    finalizeStream(state, cb);
-    cb.onDone(extractCompletion(state.full), extractThinking(state.full), state.cacheUsage);
+    finalizeStream(state, cb, tags);
+    cb.onDone(extractCompletion(state.full, tags), extractThinking(state.full, tags), state.cacheUsage);
   }
 
   private async request(
