@@ -182,6 +182,9 @@ export interface GhostwriterSettings {
   globalHooks: HookItem[];
   /** Keep completions running when switching notes and manage them in the right sidebar. */
   backgroundMode: boolean;
+  /** Instruction-bar {max_words} slider bounds (default 256 / 4096). */
+  instructionWordsMin: number;
+  instructionWordsMax: number;
   /** Tag whose content is captured as thinking/CoT and stripped from the completion. */
   cotTag: string;
   /** Tag wrapping the final completion text. */
@@ -640,6 +643,8 @@ export const DEFAULT_SETTINGS: GhostwriterSettings = {
   globalHooksEnabled: false,
   globalHooks: [],
   backgroundMode: false,
+  instructionWordsMin: 256,
+  instructionWordsMax: 4096,
   cotTag: DEFAULT_COT_TAG,
   completionTag: DEFAULT_COMPLETION_TAG,
   stripTags: [],
@@ -878,6 +883,11 @@ export function migrateSettings(raw: unknown): GhostwriterSettings {
   s.globalHooksEnabled = data.globalHooksEnabled === true;
   s.globalHooks = normalizeHooks(s.globalHooks);
   s.backgroundMode = data.backgroundMode === true;
+  const iwMin = Math.max(1, Math.floor(Number(s.instructionWordsMin ?? 256)) || 256);
+  let iwMax = Math.max(2, Math.floor(Number(s.instructionWordsMax ?? 4096)) || 4096);
+  if (iwMax <= iwMin) iwMax = iwMin + 1;
+  s.instructionWordsMin = iwMin;
+  s.instructionWordsMax = iwMax;
   s.promptPreviewBeforeSend = data.promptPreviewBeforeSend === true;
   s.warnOversizePrompt = data.warnOversizePrompt !== false;
 

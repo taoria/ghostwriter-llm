@@ -400,7 +400,7 @@ export default class GhostwriterPlugin extends Plugin {
    * Sidebar instruction bar: trigger a completion at the last active note's
    * cursor with a one-shot instruction (same mechanism as the instruction command).
    */
-  triggerInstruction(instruction: string): boolean {
+  triggerInstruction(instruction: string, maxWords?: number): boolean {
     const text = instruction.trim();
     if (!text) return false;
     const view = this.activeEditorView() ?? this.lastView;
@@ -411,7 +411,7 @@ export default class GhostwriterPlugin extends Plugin {
     }
     this.lastView = view;
     this.lastEditor = editor;
-    void this.triggerCompletion(editor, view, text);
+    void this.triggerCompletion(editor, view, text, maxWords);
     return true;
   }
 
@@ -594,15 +594,6 @@ export default class GhostwriterPlugin extends Plugin {
     }
   }
 
-  private canRenderGhost(view: EditorView | null): view is EditorView {
-    if (!view) return false;
-    try {
-      return view.dom?.isConnected !== false;
-    } catch {
-      return false;
-    }
-  }
-
   private isViewActive(view: EditorView): boolean {
     const ae = this.app.workspace.activeEditor;
     const cm = (ae?.editor as unknown as { cm?: EditorView } | undefined)?.cm;
@@ -624,7 +615,7 @@ export default class GhostwriterPlugin extends Plugin {
     return name.replace(/\.md$/i, "");
   }
 
-  private async triggerCompletion(editor: Editor, view: EditorView, instruction: string = "") {
+  private async triggerCompletion(editor: Editor, view: EditorView, instruction: string = "", maxWords?: number) {
     this.lastEditor = editor;
     this.lastView = view;
     // Only one live completion per editor: cancel whatever is still running there.
@@ -659,6 +650,13 @@ export default class GhostwriterPlugin extends Plugin {
     };
     this.sessions.unshift(session);
     this.activeSessionId = session.id;
+    // A new completion on this note replaces any older preview there; with more
+    // than one live session for the note, inline ghosts are suppressed (sidebar only).
+    for (const s of this.sessions) {
+      if (s.id !== session.id && s.filePath === session.filePath && s.view) {
+        this.clearGhostInView(s.view);
+      }
+    }
     this.scheduleSessionsRefresh();
     this.resetCacheStatus();
     this.popup.showLoading(view, cursorPos);
@@ -691,6 +689,7 @@ export default class GhostwriterPlugin extends Plugin {
       hooks,
       title: session.title,
       instruction,
+      maxWords,
     };
     session.params = params;
     session.anchorOffset = view.state.selection.main.head;
@@ -750,20 +749,19 @@ export default class GhostwriterPlugin extends Plugin {
   }
 
   private launchCompletion(session: CompletionSession, view: EditorView, pos: number, ac: AbortController): void {
-    if (this.settings.previewMode) {
-      // Preview mode: inline ghost is off. Background mode previews in the sidebar,
-      // otherwise the modal PreviewCard is used.
+    if (this.settings.previewMode && !this.settings.backgroundMode) {
+      // Non-background preview: review in the modal card, no inline ghost.
       session.inline = false;
       this.popup.hide();
-      if (this.settings.backgroundMode) {
-        void this.activateSessionsView(false);
-        this.runInlineCompletion(session, view, pos, ac);
-      } else {
-        this.runPreviewCompletion(session, view, pos, ac);
-      }
+      this.runPreviewCompletion(session, view, pos, ac);
       return;
     }
+    // Inline everywhere else — including background mode, so the target note shows
+    // the ghost when only one session is running for that note.
     session.inline = true;
+    if (this.settings.backgroundMode && this.settings.previewMode) {
+      void this.activateSessionsView(false);
+    }
     this.popup.showLoading(view, pos);
     this.runInlineCompletion(session, view, pos, ac);
   }
@@ -1131,10 +1129,22 @@ export default class GhostwriterPlugin extends Plugin {
     return false;
   }
 
+  /** True when this session is the only live one for its note (multi-session notes skip the ghost). */
+  private ghostAllowedForNote(session: CompletionSession): boolean {
+    if (!session.filePath) return true;
+    return !this.sessions.some(
+      (s) =>
+        s.id !== session.id &&
+        s.filePath === session.filePath &&
+        (s.status === "running" || s.status === "preparing")
+    );
+  }
+
   private runInlineCompletion(session: CompletionSession, view: EditorView, pos: number, ac: AbortController) {
     const peek = this.settings.peekCoT;
     const sourceDoc = view.state.doc;
-    const renderGhost = (): boolean => session.inline && this.canRenderGhost(view);
+    const renderGhost = (): boolean =>
+      session.inline && this.ghostAllowedForNote(session);
 
     let accumulated = "";
 
@@ -1281,8 +1291,9 @@ export default class GhostwriterPlugin extends Plugin {
 
   private canReuseEditor(session: CompletionSession): boolean {
     if (!session.editor || !session.view) return false;
-    if (!this.canRenderGhost(session.view)) return false;
     try {
+      // Hidden/detached editor views remain valid targets; accept falls back to
+      // direct file insertion if this throws (destroyed view) or the doc changed.
       return session.view.state.doc === session.doc;
     } catch {
       return false;
@@ -1349,8 +1360,9 @@ export default class GhostwriterPlugin extends Plugin {
     const editor = session.editor;
     const view = session.view;
     const instruction = session.params.instruction ?? "";
+    const maxWords = session.params.maxWords;
     this.removeSession(id);
-    void this.triggerCompletion(editor, view, instruction);
+    void this.triggerCompletion(editor, view, instruction, maxWords);
   }
 
   /** Assembled messages for a session (sidebar prompt preview). */
@@ -1457,6 +1469,7 @@ export default class GhostwriterPlugin extends Plugin {
     const editor = session?.editor ?? null;
     if (!editor) return;
     const instruction = session?.params.instruction ?? "";
+    const maxWords = session?.params.maxWords;
     // Replace the previous suggestion for this view with a fresh session.
     for (const s of this.sessions.filter(
       (x) => x.view === view && x.status !== "running" && x.status !== "preparing"
@@ -1465,6 +1478,6 @@ export default class GhostwriterPlugin extends Plugin {
     }
     this.clearGhostInView(view);
     this.popup.hide();
-    void this.triggerCompletion(editor, view, instruction);
+    void this.triggerCompletion(editor, view, instruction, maxWords);
   }
 }

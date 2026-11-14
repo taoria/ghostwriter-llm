@@ -69,8 +69,10 @@ Enable **Background mode** to let completions keep running when you switch notes
 - Status, elapsed time, target note and writing mode per session.
 - Actions: **Cancel**, **Accept**, **Open note**, **Retry**, **Remove**, **Clear finished**.
 - **Accept** on a non-active note writes the text back at the saved cursor offset (via the original editor when it is still valid, otherwise directly into the file).
-- With background mode on and **Preview mode** enabled, previews stream in the sidebar instead of a modal card.
+- Background mode still renders the inline ghost at the target note's cursor (also with **Preview mode** on), so returning to the note shows the streamed text. Preview mode + background uses the sidebar plus the ghost (no modal card).
+- If **more than one session is running for the same note**, inline ghosts are suppressed for that note to avoid conflicting previews; the sidebar still previews every session.
 - The sidebar footer has an **instruction bar**: choose a provider/model, type a one-shot instruction, press Enter. It triggers a new completion at the last active note's cursor (the same mechanism as *Trigger LLM completion with an instruction*) — it is an instruction trigger, not a chat.
+- Below it, a **max_words slider** overrides `{max_words}` for that one completion. Its leftmost value is the active mode's max words; the range is configurable under Display & shortcuts (default 256–4096), and `↺` resets to the mode default.
 
 When background mode is off, switching notes cancels the current suggestion (the previous behavior).
 

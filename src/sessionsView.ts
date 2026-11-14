@@ -21,6 +21,8 @@ export class SessionsView extends ItemView {
   private runningEl: HTMLElement | null = null;
   private inputEl: HTMLInputElement | null = null;
   private modelSelect: HTMLSelectElement | null = null;
+  private sliderEl: HTMLInputElement | null = null;
+  private sliderValueEl: HTMLElement | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: GhostwriterPlugin) {
     super(leaf);
@@ -50,6 +52,8 @@ export class SessionsView extends ItemView {
     this.runningEl = null;
     this.inputEl = null;
     this.modelSelect = null;
+    this.sliderEl = null;
+    this.sliderValueEl = null;
   }
 
   /** Build the persistent chrome (header + instruction bar) once; streaming only refreshes the list. */
@@ -107,10 +111,74 @@ export class SessionsView extends ItemView {
       this.send();
     });
 
+    // {max_words} slider: one-shot override for this instruction; the leftmost value
+    // is the active mode's max_words, bounded by the configured min/max.
+    const sliderRow = composer.createDiv({ cls: "ghostwriter-composer-slider" });
+    sliderRow.createSpan({ cls: "ghostwriter-composer-label", text: "max_words" });
+    const bounds = this.sliderBounds();
+    const initial = this.defaultSliderValue();
+    const slider = sliderRow.createEl("input", {
+      cls: "ghostwriter-composer-range",
+      type: "range",
+      attr: {
+        min: String(bounds.min),
+        max: String(bounds.max),
+        step: "1",
+        "aria-label": "max_words for the next completion",
+      },
+    });
+    slider.value = String(initial);
+    this.sliderEl = slider;
+    const valueEl = sliderRow.createSpan({ cls: "ghostwriter-composer-value", text: String(initial) });
+    this.sliderValueEl = valueEl;
+    slider.addEventListener("input", () => valueEl.setText(slider.value));
+    const reset = sliderRow.createEl("button", {
+      cls: "ghostwriter-composer-reset",
+      text: "↺",
+      attr: { "aria-label": "Reset to the mode default" },
+    });
+    reset.addEventListener("click", (e) => {
+      e.preventDefault();
+      const v = this.defaultSliderValue();
+      slider.value = String(v);
+      valueEl.setText(String(v));
+    });
+
     composer.createDiv({
       cls: "ghostwriter-composer-hint",
       text: "One-shot instruction appended to the next completion. It does not start a conversation.",
     });
+  }
+
+  /** Slider bounds: leftmost reaches the mode default, rightmost is the configured max. */
+  private sliderBounds(): { min: number; max: number } {
+    const s = this.plugin.settings;
+    const modeDefault = Math.max(1, Math.floor(s.maxWords || 1));
+    const configuredMin = Math.max(1, Math.floor(s.instructionWordsMin || 256));
+    const min = Math.min(configuredMin, modeDefault);
+    const max = Math.max(min + 1, Math.floor(s.instructionWordsMax || 4096));
+    return { min, max };
+  }
+
+  /** The mode's configured max_words clamped into the sidebar slider range. */
+  private defaultSliderValue(): number {
+    const { min, max } = this.sliderBounds();
+    const s = this.plugin.settings;
+    return Math.min(max, Math.max(min, Math.floor(s.maxWords || min)));
+  }
+
+  /** Keep slider min/max in sync with settings, clamping the current value. */
+  private syncSliderRange(): void {
+    if (!this.sliderEl) return;
+    const { min, max } = this.sliderBounds();
+    if (this.sliderEl.min !== String(min)) this.sliderEl.min = String(min);
+    if (this.sliderEl.max !== String(max)) this.sliderEl.max = String(max);
+    const cur = Math.floor(Number(this.sliderEl.value) || min);
+    const clamped = Math.min(max, Math.max(min, cur));
+    if (String(clamped) !== this.sliderEl.value) {
+      this.sliderEl.value = String(clamped);
+      this.sliderValueEl?.setText(String(clamped));
+    }
   }
 
   private fillModelOptions(): void {
@@ -130,7 +198,8 @@ export class SessionsView extends ItemView {
     if (!this.inputEl) return;
     const instruction = this.inputEl.value.trim();
     if (!instruction) return;
-    const ok = this.plugin.triggerInstruction(instruction);
+    const maxWords = this.sliderEl ? Number(this.sliderEl.value) : undefined;
+    const ok = this.plugin.triggerInstruction(instruction, maxWords);
     if (ok) {
       this.inputEl.value = "";
       this.inputEl.focus();
@@ -160,6 +229,7 @@ export class SessionsView extends ItemView {
         this.fillModelOptions();
       }
     }
+    this.syncSliderRange();
 
     list.empty();
     if (!sessions.length) {

@@ -977,3 +977,47 @@ details.ghostwriter-settings-advanced > .setting-item-description {
   color: var(--text-faint);
   line-height: 1.35;
 }
+
+/* ---- Sessions instruction bar: max_words slider ---- */
+.ghostwriter-composer-slider {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.ghostwriter-composer-range {
+  flex: 1 1 auto;
+  min-width: 0;
+  accent-color: var(--interactive-accent);
+}
+
+.ghostwriter-composer-value {
+  flex: 0 0 auto;
+  min-width: 38px;
+  text-align: right;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-normal);
+  font-variant-numeric: tabular-nums;
+}
+
+.ghostwriter-composer-reset {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  line-height: 1;
+  border-radius: 4px;
+  background: var(--background-modifier-hover);
+  border: 1px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.ghostwriter-composer-reset:hover {
+  color: var(--text-normal);
+}

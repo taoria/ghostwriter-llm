@@ -696,6 +696,43 @@ export class GhostwriterSettingTab extends PluginSettingTab {
         });
       });
 
+    const wordsRange = { min: this.plugin.settings.instructionWordsMin, max: this.plugin.settings.instructionWordsMax };
+    const saveWordsRange = async (): Promise<void> => {
+      const min = Math.max(1, Math.floor(Number(wordsRange.min) || 256));
+      let max = Math.max(2, Math.floor(Number(wordsRange.max) || 4096));
+      if (max <= min) max = min + 1;
+      this.plugin.settings.instructionWordsMin = min;
+      this.plugin.settings.instructionWordsMax = max;
+      await this.plugin.saveSettings();
+    };
+    new Setting(containerEl)
+      .setName("Instruction bar max_words range")
+      .setDesc("Min and max of the right-sidebar {max_words} slider (defaults 256 / 4096). The slider overrides {max_words} for instruction-bar completions only.")
+      .addText((text) =>
+        text
+          .setPlaceholder("256")
+          .setValue(String(wordsRange.min))
+          .onChange(async (value) => {
+            const n = Number(value);
+            if (Number.isFinite(n) && n >= 1) {
+              wordsRange.min = Math.floor(n);
+              await saveWordsRange();
+            }
+          })
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("4096")
+          .setValue(String(wordsRange.max))
+          .onChange(async (value) => {
+            const n = Number(value);
+            if (Number.isFinite(n) && n >= 2) {
+              wordsRange.max = Math.floor(n);
+              await saveWordsRange();
+            }
+          })
+      );
+
     new Setting(containerEl)
       .setName("Peek CoT (inline)")
       .setDesc("In inline mode, show the model's thinking stream in the floating popup near the cursor while the completion renders as ghost text. Click the 'Thinking' header to collapse/expand.")

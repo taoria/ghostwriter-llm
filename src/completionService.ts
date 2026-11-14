@@ -24,6 +24,8 @@ export interface CompletionParams {
   hooks?: string;
   /** Short user requirement for this continuation (from the instruction hotkey). Injected at {extra}. */
   instruction?: string;
+  /** Per-request override of the {max_words} value (one-shot, does not change the mode). */
+  maxWords?: number;
 }
 
 export interface CacheUsage {
@@ -66,6 +68,7 @@ export function buildMessages(p: CompletionParams, settings: GhostwriterSettings
   const hooks = p.hooks?.trim() ?? "";
   const extra = settings.extraPrompt?.trim() ?? "";
   const title = p.title?.trim() ?? "";
+  const maxWords = p.maxWords && p.maxWords > 0 ? Math.floor(p.maxWords) : settings.maxWords;
   const tags = tagSetFor(settings);
   const rawTpl = settings.promptTemplate && settings.promptTemplate.trim()
     ? settings.promptTemplate
@@ -83,7 +86,7 @@ export function buildMessages(p: CompletionParams, settings: GhostwriterSettings
     extra,
     prefix: p.prefix,
     suffix: p.suffix,
-    maxWords: settings.maxWords,
+    maxWords,
     title,
   });
 
@@ -95,7 +98,7 @@ export function buildMessages(p: CompletionParams, settings: GhostwriterSettings
     extra: "",
     prefix: "",
     suffix: "",
-    maxWords: settings.maxWords,
+    maxWords,
     title,
   });
   if (systemContent.trim()) {
