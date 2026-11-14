@@ -12,11 +12,15 @@ const STATUS_LABEL: Record<CompletionSession["status"], string> = {
   cancelled: "cancelled",
 };
 
-/** Right-sidebar session manager: live preview + actions for every completion. */
+/** Right-sidebar session manager: live preview + actions for every completion, plus an instruction bar. */
 export class SessionsView extends ItemView {
   private plugin: GhostwriterPlugin;
   /** Persisted <details> open state across re-renders. */
   private openDetails = new Set<string>();
+  private listEl: HTMLElement | null = null;
+  private runningEl: HTMLElement | null = null;
+  private inputEl: HTMLInputElement | null = null;
+  private modelSelect: HTMLSelectElement | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: GhostwriterPlugin) {
     super(leaf);
@@ -36,32 +40,130 @@ export class SessionsView extends ItemView {
   }
 
   async onOpen(): Promise<void> {
-    this.contentEl.addClass("ghostwriter-sessions-view");
+    this.buildLayout();
     this.render();
   }
 
   async onClose(): Promise<void> {
     this.contentEl.empty();
+    this.listEl = null;
+    this.runningEl = null;
+    this.inputEl = null;
+    this.modelSelect = null;
   }
 
-  render(): void {
+  /** Build the persistent chrome (header + instruction bar) once; streaming only refreshes the list. */
+  private buildLayout(): void {
     const root = this.contentEl;
     root.empty();
     root.addClass("ghostwriter-sessions-view");
 
     const header = root.createDiv({ cls: "ghostwriter-sessions-header" });
     header.createSpan({ cls: "ghostwriter-sessions-title", text: "Background sessions" });
-    const running = this.plugin.getSessions().filter((s) => s.status === "running" || s.status === "preparing").length;
-    if (running) header.createSpan({ cls: "ghostwriter-sessions-running", text: `${running} running` });
+    this.runningEl = header.createSpan({ cls: "ghostwriter-sessions-running" });
+    this.runningEl.style.display = "none";
     const clear = header.createEl("button", { cls: "ghostwriter-sessions-clear", text: "Clear finished" });
     clear.addEventListener("click", (e) => {
       e.preventDefault();
       this.plugin.clearFinishedSessions();
     });
 
+    this.listEl = root.createDiv({ cls: "ghostwriter-sessions-list" });
+
+    // Instruction bar: the typed text is a one-shot instruction for the next
+    // completion (same as the "completion with an instruction" command), not a chat.
+    const composer = root.createDiv({ cls: "ghostwriter-sessions-composer" });
+
+    const top = composer.createDiv({ cls: "ghostwriter-composer-top" });
+    const modelWrap = top.createDiv({ cls: "ghostwriter-composer-model" });
+    modelWrap.createSpan({ cls: "ghostwriter-composer-label", text: "Model" });
+    const select = top.createEl("select", { cls: "ghostwriter-composer-select" });
+    this.modelSelect = select;
+    this.fillModelOptions();
+    select.addEventListener("change", () => {
+      void this.plugin.switchProvider(select.value);
+    });
+
+    const row = composer.createDiv({ cls: "ghostwriter-composer-row" });
+    const input = row.createEl("input", {
+      cls: "ghostwriter-composer-input",
+      type: "text",
+      attr: {
+        placeholder: "Instruction for the next completion (not a chat)…",
+        "aria-label": "Instruction for the next completion",
+      },
+    });
+    this.inputEl = input;
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.isComposing) {
+        e.preventDefault();
+        this.send();
+      }
+    });
+    const send = row.createEl("button", { cls: "ghostwriter-composer-send", attr: { "aria-label": "Trigger completion with this instruction" } });
+    setIcon(send, "send");
+    send.addEventListener("click", (e) => {
+      e.preventDefault();
+      this.send();
+    });
+
+    composer.createDiv({
+      cls: "ghostwriter-composer-hint",
+      text: "One-shot instruction appended to the next completion. It does not start a conversation.",
+    });
+  }
+
+  private fillModelOptions(): void {
+    if (!this.modelSelect) return;
+    const s = this.plugin.settings;
+    this.modelSelect.empty();
+    for (const p of s.providers) {
+      const option = this.modelSelect.createEl("option", {
+        text: `${p.name || p.id} · ${p.model || "?"}`,
+      });
+      option.value = p.id;
+      if (p.id === s.activeProviderId) option.selected = true;
+    }
+  }
+
+  private send(): void {
+    if (!this.inputEl) return;
+    const instruction = this.inputEl.value.trim();
+    if (!instruction) return;
+    const ok = this.plugin.triggerInstruction(instruction);
+    if (ok) {
+      this.inputEl.value = "";
+      this.inputEl.focus();
+    }
+  }
+
+  /** Re-render only the session list and the running badge; the instruction bar keeps focus/value. */
+  render(): void {
+    if (!this.listEl) {
+      this.buildLayout();
+    }
+    const list = this.listEl;
+    if (!list) return;
     const sessions = this.plugin.getSessions();
+    const running = sessions.filter((s) => s.status === "running" || s.status === "preparing").length;
+    if (this.runningEl) {
+      this.runningEl.style.display = running ? "" : "none";
+      this.runningEl.setText(`${running} running`);
+    }
+    // The provider list may have changed in settings; keep the selector fresh.
+    if (this.modelSelect) {
+      const active = this.plugin.settings.activeProviderId;
+      if (
+        this.modelSelect.value !== active ||
+        this.modelSelect.options.length !== this.plugin.settings.providers.length
+      ) {
+        this.fillModelOptions();
+      }
+    }
+
+    list.empty();
     if (!sessions.length) {
-      root.createEl("p", {
+      list.createEl("p", {
         cls: "ghostwriter-sessions-empty",
         text: this.plugin.settings.backgroundMode
           ? "No sessions yet. Trigger a completion and switch notes freely — it keeps running here."
@@ -69,8 +171,6 @@ export class SessionsView extends ItemView {
       });
       return;
     }
-
-    const list = root.createDiv({ cls: "ghostwriter-sessions-list" });
     for (const session of sessions) this.renderSession(list, session);
   }
 

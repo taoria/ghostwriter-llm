@@ -884,3 +884,96 @@ details.ghostwriter-settings-advanced > .setting-item-description {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }
 }
+
+/* ---- Sessions instruction bar ---- */
+.ghostwriter-sessions-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.ghostwriter-sessions-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.ghostwriter-sessions-composer {
+  flex: 0 0 auto;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.ghostwriter-composer-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.ghostwriter-composer-label {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.ghostwriter-composer-model {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ghostwriter-composer-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--font-ui-smaller);
+  height: 26px;
+  padding: 0 6px;
+}
+
+.ghostwriter-composer-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ghostwriter-composer-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 32px;
+}
+
+.ghostwriter-composer-send {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 6px;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border: 1px solid var(--interactive-accent);
+  cursor: pointer;
+}
+
+.ghostwriter-composer-send:hover {
+  filter: brightness(1.08);
+}
+
+.ghostwriter-composer-send svg {
+  width: 16px;
+  height: 16px;
+}
+
+.ghostwriter-composer-hint {
+  margin-top: 5px;
+  font-size: 10px;
+  color: var(--text-faint);
+  line-height: 1.35;
+}

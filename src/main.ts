@@ -114,6 +114,9 @@ export default class GhostwriterPlugin extends Plugin {
   /** Most recently started/active session. */
   private activeSessionId: string | null = null;
   private sessionsRefreshTimer: number | null = null;
+  /** Last Markdown editor/view that was active, used by the sidebar instruction bar. */
+  private lastEditor: Editor | null = null;
+  private lastView: EditorView | null = null;
   private sessionSummaryOn: boolean = true;
   private statusBarEl: HTMLElement | null = null;
   private currentSummaryStatusBarEl: HTMLElement | null = null;
@@ -278,6 +281,12 @@ export default class GhostwriterPlugin extends Plugin {
 
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
+        const v = this.activeEditorView();
+        if (v) {
+          this.lastView = v;
+          const ed = this.app.workspace.activeEditor?.editor;
+          if (ed) this.lastEditor = ed;
+        }
         this.updateStatusBar();
         if (this.settings.backgroundMode) {
           // Sessions keep running in the background; hide the floating popup of the previous view.
@@ -385,6 +394,25 @@ export default class GhostwriterPlugin extends Plugin {
 
   openGlobalHooks(): void {
     new GlobalHooksModal(this.app, this).open();
+  }
+
+  /**
+   * Sidebar instruction bar: trigger a completion at the last active note's
+   * cursor with a one-shot instruction (same mechanism as the instruction command).
+   */
+  triggerInstruction(instruction: string): boolean {
+    const text = instruction.trim();
+    if (!text) return false;
+    const view = this.activeEditorView() ?? this.lastView;
+    const editor = this.app.workspace.activeEditor?.editor ?? this.lastEditor;
+    if (!view || !editor) {
+      new Notice("Open a note first, then send an instruction");
+      return false;
+    }
+    this.lastView = view;
+    this.lastEditor = editor;
+    void this.triggerCompletion(editor, view, text);
+    return true;
   }
 
   onunload() {
@@ -597,6 +625,8 @@ export default class GhostwriterPlugin extends Plugin {
   }
 
   private async triggerCompletion(editor: Editor, view: EditorView, instruction: string = "") {
+    this.lastEditor = editor;
+    this.lastView = view;
     // Only one live completion per editor: cancel whatever is still running there.
     const existing = this.runningSessionForView(view);
     if (existing) {
