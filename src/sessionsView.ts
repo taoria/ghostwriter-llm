@@ -123,7 +123,7 @@ export class SessionsView extends ItemView {
       attr: {
         min: String(bounds.min),
         max: String(bounds.max),
-        step: "1",
+        step: String(this.sliderStep()),
         "aria-label": "max_words for the next completion",
       },
     });
@@ -150,6 +150,18 @@ export class SessionsView extends ItemView {
     });
   }
 
+  /** Snap increment for the slider (default 64). */
+  private sliderStep(): number {
+    return Math.max(1, Math.floor(this.plugin.settings.instructionWordsStep || 64));
+  }
+
+  /** Snap a raw value to the nearest step above the slider minimum. */
+  private snapSliderValue(value: number, min: number, max: number): number {
+    const step = this.sliderStep();
+    const snapped = min + Math.round((value - min) / step) * step;
+    return Math.min(max, Math.max(min, snapped));
+  }
+
   /** Slider bounds: leftmost reaches the mode default, rightmost is the configured max. */
   private sliderBounds(): { min: number; max: number } {
     const s = this.plugin.settings;
@@ -160,21 +172,23 @@ export class SessionsView extends ItemView {
     return { min, max };
   }
 
-  /** The mode's configured max_words clamped into the sidebar slider range. */
+  /** The mode's configured max_words clamped and snapped into the sidebar slider range. */
   private defaultSliderValue(): number {
     const { min, max } = this.sliderBounds();
     const s = this.plugin.settings;
-    return Math.min(max, Math.max(min, Math.floor(s.maxWords || min)));
+    return this.snapSliderValue(Math.floor(s.maxWords || min), min, max);
   }
 
-  /** Keep slider min/max in sync with settings, clamping the current value. */
+  /** Keep slider min/max/step in sync with settings, snapping and clamping the value. */
   private syncSliderRange(): void {
     if (!this.sliderEl) return;
     const { min, max } = this.sliderBounds();
+    const step = this.sliderStep();
     if (this.sliderEl.min !== String(min)) this.sliderEl.min = String(min);
     if (this.sliderEl.max !== String(max)) this.sliderEl.max = String(max);
+    if (this.sliderEl.step !== String(step)) this.sliderEl.step = String(step);
     const cur = Math.floor(Number(this.sliderEl.value) || min);
-    const clamped = Math.min(max, Math.max(min, cur));
+    const clamped = this.snapSliderValue(cur, min, max);
     if (String(clamped) !== this.sliderEl.value) {
       this.sliderEl.value = String(clamped);
       this.sliderValueEl?.setText(String(clamped));

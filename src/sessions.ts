@@ -32,6 +32,8 @@ export interface CompletionSession {
   doc: unknown;
   /** True when the suggestion is rendered as inline ghost text in `view`. */
   inline: boolean;
+  /** The user dismissed the ghost; don't re-create it on note focus. */
+  ghostDismissed?: boolean;
   cacheUsage?: CacheUsage;
 }
 

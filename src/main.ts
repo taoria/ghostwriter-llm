@@ -143,6 +143,7 @@ export default class GhostwriterPlugin extends Plugin {
       onAccept: (view) => this.accept(view),
       onDismiss: (view) => this.dismiss(view),
       isBusy: (view) => this.hasRunningSessionForView(view),
+      hasAcceptable: (view) => this.hasAcceptableSession(view),
     }, () => ({
       accept: this.settings.acceptKey,
       dismiss: this.settings.dismissKey,
@@ -291,11 +292,19 @@ export default class GhostwriterPlugin extends Plugin {
         if (this.settings.backgroundMode) {
           // Sessions keep running in the background; hide the floating popup of the previous view.
           this.popup.hide();
-          // Returning to a note whose completion finished while away: re-show its action bar.
+          // Returning to a note whose completion finished while away: restore the
+          // ghost (if it was cleared) and re-show its action bar.
           const v = this.activeEditorView();
-          if (v && getGhost(v.state)) {
-            const done = this.sessions.find((s) => s.view === v && s.status === "done");
-            if (done) this.popup.showActions(v, done.anchorOffset);
+          if (v) {
+            const done = this.sessions.find(
+              (s) => s.view === v && s.status === "done" && !!s.completion && !s.ghostDismissed
+            );
+            if (done && this.ghostAllowedForNote(done)) {
+              if (!getGhost(v.state)) {
+                this.setGhostInView(v, { text: done.completion, pos: done.anchorOffset });
+              }
+              this.popup.showActions(v, done.anchorOffset);
+            }
           }
         } else {
           // Legacy behavior: switching notes cancels the current suggestion.
@@ -515,6 +524,19 @@ export default class GhostwriterPlugin extends Plugin {
 
   hasRunningSessionForView(view: EditorView): boolean {
     return !!this.runningSessionForView(view);
+  }
+
+  /** A finished session exists for this view (used so Tab still accepts after a ghost was cleared). */
+  hasAcceptableSession(view: EditorView): boolean {
+    return this.sessions.some((s) => {
+      if (s.view !== view || s.status !== "done" || !s.completion || s.ghostDismissed) return false;
+      try {
+        // Refuse stale accepts after the note has been edited.
+        return view.state.doc === s.doc;
+      } catch {
+        return false;
+      }
+    });
   }
 
   private newestRunningSession(): CompletionSession | undefined {
@@ -1378,12 +1400,17 @@ export default class GhostwriterPlugin extends Plugin {
     const v = view ?? this.activeEditorView();
     if (!v) return;
     const ghost = getGhost(v.state);
-    if (!ghost) return;
-    const session = this.sessions.find((s) => s.view === v);
+    const sessionsForView = this.sessions.filter((s) => s.view === v);
+    // Prefer a finished background session (it remains acceptable even if the
+    // ghost decoration was cleared by a cursor move); otherwise the newest one.
+    const session =
+      sessionsForView.find((s) => s.status === "done" && s.completion && !s.ghostDismissed) ??
+      sessionsForView.find((s) => !!s.completion);
     if (session) {
-      if (session.completion) void this.acceptSession(session.id);
+      void this.acceptSession(session.id);
       return;
     }
+    if (!ghost) return;
     const editor = this.editorForView(v);
     if (!editor) return;
     this.clearGhostInView(v);
@@ -1403,6 +1430,7 @@ export default class GhostwriterPlugin extends Plugin {
       this.preview = null;
     }
     if (target) {
+      target.ghostDismissed = true;
       if (target.view) this.clearGhostInView(target.view);
       this.cancelSession(target.id);
     }

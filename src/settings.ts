@@ -182,9 +182,10 @@ export interface GhostwriterSettings {
   globalHooks: HookItem[];
   /** Keep completions running when switching notes and manage them in the right sidebar. */
   backgroundMode: boolean;
-  /** Instruction-bar {max_words} slider bounds (default 256 / 4096). */
+  /** Instruction-bar {max_words} slider bounds (default 256 / 4096) and snap step. */
   instructionWordsMin: number;
   instructionWordsMax: number;
+  instructionWordsStep: number;
   /** Tag whose content is captured as thinking/CoT and stripped from the completion. */
   cotTag: string;
   /** Tag wrapping the final completion text. */
@@ -645,6 +646,7 @@ export const DEFAULT_SETTINGS: GhostwriterSettings = {
   backgroundMode: false,
   instructionWordsMin: 256,
   instructionWordsMax: 4096,
+  instructionWordsStep: 64,
   cotTag: DEFAULT_COT_TAG,
   completionTag: DEFAULT_COMPLETION_TAG,
   stripTags: [],
@@ -888,6 +890,8 @@ export function migrateSettings(raw: unknown): GhostwriterSettings {
   if (iwMax <= iwMin) iwMax = iwMin + 1;
   s.instructionWordsMin = iwMin;
   s.instructionWordsMax = iwMax;
+  const iwStep = Math.max(1, Math.floor(Number(s.instructionWordsStep ?? 64)) || 64);
+  s.instructionWordsStep = Math.min(iwStep, Math.max(1, iwMax - iwMin));
   s.promptPreviewBeforeSend = data.promptPreviewBeforeSend === true;
   s.warnOversizePrompt = data.warnOversizePrompt !== false;
 

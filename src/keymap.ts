@@ -7,6 +7,8 @@ export interface GhostKeyHandlers {
   onDismiss: (view: EditorView) => void;
   /** True while a completion is generating for this view; allows dismissal keys to cancel even without ghost text. */
   isBusy?: (view: EditorView) => boolean;
+  /** True when a finished background session can still be accepted even if its ghost was cleared. */
+  hasAcceptable?: (view: EditorView) => boolean;
 }
 
 const KEY_ALIASES: Record<string, string> = {
@@ -99,7 +101,7 @@ export function ghostKeymap(
       run: (view: EditorView): boolean => {
         const acceptKeys = parseKeys(getKeys().accept);
         if (!acceptKeys.includes(combo)) return false;
-        if (!getGhost(view.state)) return false;
+        if (!getGhost(view.state) && !(handlers.hasAcceptable?.(view) ?? false)) return false;
         handlers.onAccept(view);
         return true;
       },
@@ -123,7 +125,8 @@ export function ghostKeymap(
     keydown: (event: KeyboardEvent, view: EditorView) => {
       const ghost = getGhost(view.state);
       const busy = handlers.isBusy?.(view) ?? false;
-      if (!ghost && !busy) return false;
+      const acceptable = handlers.hasAcceptable?.(view) ?? false;
+      if (!ghost && !busy && !acceptable) return false;
       const acceptKeys = parseKeys(getKeys().accept);
       const dismissKeys = parseKeys(getKeys().dismiss);
       const name = eventToKeyName(event);
@@ -133,7 +136,7 @@ export function ghostKeymap(
         handlers.onDismiss(view);
         return true;
       }
-      if (ghost && acceptKeys.includes(name)) {
+      if ((ghost || acceptable) && acceptKeys.includes(name)) {
         if (ACCEPT_COMBOS.includes(name)) return false;
         event.preventDefault();
         handlers.onAccept(view);

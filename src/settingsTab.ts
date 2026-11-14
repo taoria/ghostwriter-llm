@@ -696,18 +696,24 @@ export class GhostwriterSettingTab extends PluginSettingTab {
         });
       });
 
-    const wordsRange = { min: this.plugin.settings.instructionWordsMin, max: this.plugin.settings.instructionWordsMax };
+    const wordsRange = {
+      min: this.plugin.settings.instructionWordsMin,
+      max: this.plugin.settings.instructionWordsMax,
+      step: this.plugin.settings.instructionWordsStep,
+    };
     const saveWordsRange = async (): Promise<void> => {
       const min = Math.max(1, Math.floor(Number(wordsRange.min) || 256));
       let max = Math.max(2, Math.floor(Number(wordsRange.max) || 4096));
       if (max <= min) max = min + 1;
+      const step = Math.max(1, Math.floor(Number(wordsRange.step) || 64));
       this.plugin.settings.instructionWordsMin = min;
       this.plugin.settings.instructionWordsMax = max;
+      this.plugin.settings.instructionWordsStep = Math.min(step, Math.max(1, max - min));
       await this.plugin.saveSettings();
     };
     new Setting(containerEl)
       .setName("Instruction bar max_words range")
-      .setDesc("Min and max of the right-sidebar {max_words} slider (defaults 256 / 4096). The slider overrides {max_words} for instruction-bar completions only.")
+      .setDesc("Min, max and snap step of the right-sidebar {max_words} slider (defaults 256 / 4096 / 64). The slider overrides {max_words} for instruction-bar completions only.")
       .addText((text) =>
         text
           .setPlaceholder("256")
@@ -728,6 +734,18 @@ export class GhostwriterSettingTab extends PluginSettingTab {
             const n = Number(value);
             if (Number.isFinite(n) && n >= 2) {
               wordsRange.max = Math.floor(n);
+              await saveWordsRange();
+            }
+          })
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("step 64")
+          .setValue(String(wordsRange.step))
+          .onChange(async (value) => {
+            const n = Number(value);
+            if (Number.isFinite(n) && n >= 1) {
+              wordsRange.step = Math.floor(n);
               await saveWordsRange();
             }
           })
