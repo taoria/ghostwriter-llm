@@ -1021,3 +1021,54 @@ details.ghostwriter-settings-advanced > .setting-item-description {
 .ghostwriter-composer-reset:hover {
   color: var(--text-normal);
 }
+
+/* ---- Instruction bar model fetch ---- */
+.ghostwriter-composer-provider {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ghostwriter-composer-modellist {
+  width: 100%;
+  margin-top: 6px;
+  height: 28px;
+  font-size: var(--font-ui-smaller);
+}
+
+.ghostwriter-composer-refresh {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  background: var(--background-modifier-hover);
+  border: 1px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.ghostwriter-composer-refresh:hover {
+  color: var(--text-normal);
+}
+
+.ghostwriter-composer-refresh:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.ghostwriter-composer-refresh svg {
+  width: 14px;
+  height: 14px;
+}
+
+.ghostwriter-composer-refresh.is-loading svg {
+  animation: ghostwriter-spin 1s linear infinite;
+}
+
+@keyframes ghostwriter-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}

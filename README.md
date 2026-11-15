@@ -72,7 +72,8 @@ Enable **Background mode** to let completions keep running when you switch notes
 - Background mode still renders the inline ghost at the target note's cursor (also with **Preview mode** on), so returning to the note shows the streamed text. Preview mode + background uses the sidebar plus the ghost (no modal card).
 - If **more than one session is running for the same note**, inline ghosts are suppressed for that note to avoid conflicting previews; the sidebar still previews every session.
 - In the focused note, the configured accept key (e.g. **Tab**) accepts a finished background session even if the ghost decoration was cleared by moving the cursor; the text is inserted at the session's saved anchor, not the current cursor.
-- The sidebar footer has an **instruction bar**: choose a provider/model, type a one-shot instruction, press Enter. It triggers a new completion at the last active note's cursor (the same mechanism as *Trigger LLM completion with an instruction*) — it is an instruction trigger, not a chat.
+- The sidebar footer has an **instruction bar**: choose a provider and model, type a one-shot instruction, press Enter. It triggers a new completion at the last active note's cursor (the same mechanism as *Trigger LLM completion with an instruction*) — it is an instruction trigger, not a chat.
+- The model dropdown is filled from the provider's `/models` endpoint with the same connection settings as the settings page; the list is cached per base URL/key, and the **refresh** button re-fetches it. Picking a model updates the active provider.
 - Below it, a **max_words slider** overrides `{max_words}` for that one completion. Its leftmost value is the active mode's max words; min / max / snap step are configurable under Display & shortcuts (defaults 256 / 4096 / 64), and `↺` resets to the mode default.
 
 When background mode is off, switching notes cancels the current suggestion (the previous behavior).

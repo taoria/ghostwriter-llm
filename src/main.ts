@@ -3,6 +3,7 @@ import { EditorView } from "@codemirror/view";
 import {
   GhostwriterSettings,
   ModeProfile,
+  ProviderProfile,
   PromptLanguage,
   migrateSettings,
   captureActiveMode,
@@ -10,6 +11,7 @@ import {
   activeMode,
   cloneModeFromSettings,
   defaultModeProfiles,
+  parseCustomHeaders,
 } from "./settings";
 import { GhostwriterSettingTab } from "./settingsTab";
 import { CacheUsage, CompletionService, CompletionParams, formatCacheUsage, fetchModels } from "./completionService";
@@ -117,6 +119,8 @@ export default class GhostwriterPlugin extends Plugin {
   /** Last Markdown editor/view that was active, used by the sidebar instruction bar. */
   private lastEditor: Editor | null = null;
   private lastView: EditorView | null = null;
+  /** Fetched model lists, keyed by provider connection (base URL + key). */
+  private modelCache = new Map<string, string[]>();
   private sessionSummaryOn: boolean = true;
   private statusBarEl: HTMLElement | null = null;
   private currentSummaryStatusBarEl: HTMLElement | null = null;
@@ -442,6 +446,40 @@ export default class GhostwriterPlugin extends Plugin {
     if (!p) return;
     this.settings.activeProviderId = p.id;
     await this.saveSettings();
+  }
+
+  /** Change the active provider's model (used by the sidebar instruction bar). */
+  async setActiveModel(model: string): Promise<void> {
+    const p = this.settings.providers.find((x) => x.id === this.settings.activeProviderId);
+    if (!p || !model) return;
+    p.model = model;
+    await this.saveSettings();
+  }
+
+  /**
+   * Fetch the provider's model list with the same connection settings as the
+   * settings page, caching it per base URL + key until a forced refresh.
+   */
+  async fetchProviderModels(providerId: string, force = false): Promise<string[]> {
+    const p = this.settings.providers.find((x) => x.id === providerId);
+    if (!p) return [];
+    if (!p.apiBaseUrl.trim()) throw new Error("No API Base URL configured");
+    const key = `${p.apiBaseUrl}\n${p.apiKey}`;
+    if (!force && this.modelCache.has(key)) return this.modelCache.get(key) ?? [];
+    const models = await fetchModels(
+      p.apiBaseUrl,
+      p.apiKey,
+      parseCustomHeaders(this.settings.customHeaders ?? "")
+    );
+    this.modelCache.set(key, models);
+    return models;
+  }
+
+  /** The cached model list for a provider, if any (no network request). */
+  cachedProviderModels(providerId: string): string[] | null {
+    const p = this.settings.providers.find((x) => x.id === providerId);
+    if (!p) return null;
+    return this.modelCache.get(`${p.apiBaseUrl}\n${p.apiKey}`) ?? null;
   }
 
   async saveSettings() {

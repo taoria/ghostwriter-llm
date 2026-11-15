@@ -1,4 +1,4 @@
-import { ItemView, WorkspaceLeaf, setIcon } from "obsidian";
+import { ItemView, Notice, WorkspaceLeaf, setIcon } from "obsidian";
 import type GhostwriterPlugin from "./main";
 import { CompletionSession, sessionElapsed } from "./sessions";
 
@@ -20,7 +20,11 @@ export class SessionsView extends ItemView {
   private listEl: HTMLElement | null = null;
   private runningEl: HTMLElement | null = null;
   private inputEl: HTMLInputElement | null = null;
+  private providerSelect: HTMLSelectElement | null = null;
   private modelSelect: HTMLSelectElement | null = null;
+  private modelRefreshBtn: HTMLButtonElement | null = null;
+  private modelsLoading = false;
+  private modelLoadToken = 0;
   private sliderEl: HTMLInputElement | null = null;
   private sliderValueEl: HTMLElement | null = null;
 
@@ -51,7 +55,9 @@ export class SessionsView extends ItemView {
     this.listEl = null;
     this.runningEl = null;
     this.inputEl = null;
+    this.providerSelect = null;
     this.modelSelect = null;
+    this.modelRefreshBtn = null;
     this.sliderEl = null;
     this.sliderValueEl = null;
   }
@@ -79,14 +85,39 @@ export class SessionsView extends ItemView {
     const composer = root.createDiv({ cls: "ghostwriter-sessions-composer" });
 
     const top = composer.createDiv({ cls: "ghostwriter-composer-top" });
-    const modelWrap = top.createDiv({ cls: "ghostwriter-composer-model" });
-    modelWrap.createSpan({ cls: "ghostwriter-composer-label", text: "Model" });
-    const select = top.createEl("select", { cls: "ghostwriter-composer-select" });
-    this.modelSelect = select;
-    this.fillModelOptions();
-    select.addEventListener("change", () => {
-      void this.plugin.switchProvider(select.value);
+    top.createSpan({ cls: "ghostwriter-composer-label", text: "Model" });
+
+    const providerSelect = top.createEl("select", {
+      cls: "ghostwriter-composer-select ghostwriter-composer-provider",
+      attr: { "aria-label": "Provider" },
     });
+    this.providerSelect = providerSelect;
+    this.fillProviderOptions();
+    providerSelect.addEventListener("change", () => {
+      void this.onProviderSelected(providerSelect.value);
+    });
+
+    const refresh = top.createEl("button", {
+      cls: "ghostwriter-composer-refresh",
+      attr: { "aria-label": "Fetch / refresh the model list" },
+    });
+    setIcon(refresh, "refresh-cw");
+    this.modelRefreshBtn = refresh;
+    refresh.addEventListener("click", (e) => {
+      e.preventDefault();
+      void this.loadModels(true, true);
+    });
+
+    const modelSelect = composer.createEl("select", {
+      cls: "ghostwriter-composer-select ghostwriter-composer-modellist",
+      attr: { "aria-label": "Model" },
+    });
+    this.modelSelect = modelSelect;
+    this.seedModelOptions();
+    modelSelect.addEventListener("change", () => {
+      if (modelSelect.value) void this.plugin.setActiveModel(modelSelect.value);
+    });
+    void this.loadModels(false, false);
 
     const row = composer.createDiv({ cls: "ghostwriter-composer-row" });
     const input = row.createEl("input", {
@@ -195,17 +226,80 @@ export class SessionsView extends ItemView {
     }
   }
 
-  private fillModelOptions(): void {
-    if (!this.modelSelect) return;
+  private activeProvider() {
     const s = this.plugin.settings;
-    this.modelSelect.empty();
+    return s.providers.find((p) => p.id === s.activeProviderId) ?? s.providers[0];
+  }
+
+  private fillProviderOptions(): void {
+    if (!this.providerSelect) return;
+    const s = this.plugin.settings;
+    this.providerSelect.empty();
     for (const p of s.providers) {
-      const option = this.modelSelect.createEl("option", {
-        text: `${p.name || p.id} · ${p.model || "?"}`,
-      });
+      const option = this.providerSelect.createEl("option", { text: p.name || p.id });
       option.value = p.id;
       if (p.id === s.activeProviderId) option.selected = true;
     }
+  }
+
+  private seedModelOptions(): void {
+    const p = this.activeProvider();
+    this.setModelOptions(p?.model ? [p.model] : [], p?.model ?? "");
+  }
+
+  private setModelOptions(models: string[], selected: string): void {
+    if (!this.modelSelect) return;
+    const list = selected && !models.includes(selected) ? [selected, ...models] : [...models];
+    this.modelSelect.empty();
+    for (const m of list) {
+      const option = this.modelSelect.createEl("option", { text: m });
+      option.value = m;
+      if (m === selected) option.selected = true;
+    }
+    if (!list.length) {
+      const option = this.modelSelect.createEl("option", { text: "(no models)" });
+      option.value = "";
+    }
+  }
+
+  /** Load the active provider's model list from cache, or fetch it. */
+  private async loadModels(force: boolean, notify: boolean): Promise<void> {
+    const p = this.activeProvider();
+    if (!p) return;
+    const activeId = p.id;
+    const token = ++this.modelLoadToken;
+    this.modelsLoading = true;
+    if (this.modelRefreshBtn) {
+      this.modelRefreshBtn.disabled = true;
+      this.modelRefreshBtn.addClass("is-loading");
+    }
+    // Show the cached list (or the current model) immediately.
+    const cached = this.plugin.cachedProviderModels(activeId);
+    this.setModelOptions(cached ?? (p.model ? [p.model] : []), p.model ?? "");
+    try {
+      const models = await this.plugin.fetchProviderModels(activeId, force);
+      if (token !== this.modelLoadToken) return;
+      const cur = this.activeProvider()?.model ?? "";
+      this.setModelOptions(models, cur);
+      if (notify) new Notice(models.length ? `Found ${models.length} models` : "The provider returned no models");
+    } catch (err) {
+      if (token !== this.modelLoadToken) return;
+      if (notify) new Notice(`Fetch models failed: ${(err as Error).message}`);
+      else console.warn("[ghostwriter] fetch models failed", err);
+    } finally {
+      if (token === this.modelLoadToken) {
+        this.modelsLoading = false;
+        if (this.modelRefreshBtn) {
+          this.modelRefreshBtn.disabled = false;
+          this.modelRefreshBtn.removeClass("is-loading");
+        }
+      }
+    }
+  }
+
+  private async onProviderSelected(id: string): Promise<void> {
+    await this.plugin.switchProvider(id);
+    await this.loadModels(false, false);
   }
 
   private send(): void {
@@ -233,14 +327,21 @@ export class SessionsView extends ItemView {
       this.runningEl.style.display = running ? "" : "none";
       this.runningEl.setText(`${running} running`);
     }
-    // The provider list may have changed in settings; keep the selector fresh.
-    if (this.modelSelect) {
-      const active = this.plugin.settings.activeProviderId;
-      if (
-        this.modelSelect.value !== active ||
-        this.modelSelect.options.length !== this.plugin.settings.providers.length
-      ) {
-        this.fillModelOptions();
+    // The provider list may have changed in settings; keep both selectors fresh.
+    const activeId = this.plugin.settings.activeProviderId;
+    if (
+      this.providerSelect &&
+      (this.providerSelect.value !== activeId ||
+        this.providerSelect.options.length !== this.plugin.settings.providers.length)
+    ) {
+      this.fillProviderOptions();
+      void this.loadModels(false, false);
+    }
+    if (this.modelSelect && !this.modelsLoading) {
+      const cur = this.activeProvider()?.model ?? "";
+      if (cur && this.modelSelect.value !== cur) {
+        const has = Array.from(this.modelSelect.options).some((o) => o.value === cur);
+        if (has) this.modelSelect.value = cur;
       }
     }
     this.syncSliderRange();
